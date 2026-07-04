@@ -1897,8 +1897,10 @@ class CareKeeperWindow(QMainWindow):
         self._set_measure_button(self.btn_bp, "BtnNIBPDone", "วัดแล้ว\nความดัน", True)
 
     def _submit_data(self) -> None:
+        patient_id = "".join(ch for ch in self.patient.cid if ch.isdigit())
         payload = {
             "mac": getattr(self.provider, "device_mac", "unknown") or "unknown",
+            "patient_id": patient_id,
             "spo2": self.vitals.spo2,
             "heart_rate": self.vitals.pulse,
             "pr_bpm": self.vitals.pulse,
