@@ -21,23 +21,25 @@ def provider(monkeypatch):
     return p
 
 
-def _subprocess_factory(fail_times: int, success_return=None, exc_cls=subprocess.CalledProcessError):
-    calls = {"n": 0}
+def _wifi_run_factory(connect_fail_times: int):
+    """Command-aware fake for subprocess.run. The best-effort rescan
+    (`... wifi list --rescan yes`) always succeeds; only the `connect` command
+    drives the retry logic, failing its first `connect_fail_times` calls."""
+    connect_calls = {"n": 0}
 
-    def fake_run(*args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] <= fail_times:
-            if exc_cls is subprocess.CalledProcessError:
-                raise exc_cls(1, args[0], output="", stderr="fake nmcli failure")
-            raise exc_cls("fake failure")
-        return success_return
+    def fake_run(cmd, *args, **kwargs):
+        if "connect" in cmd:
+            connect_calls["n"] += 1
+            if connect_calls["n"] <= connect_fail_times:
+                raise subprocess.CalledProcessError(1, cmd, output="", stderr="fake nmcli failure")
+        return None  # rescan and successful connects
 
-    fake_run.calls = calls
+    fake_run.connect_calls = connect_calls
     return fake_run
 
 
 def test_connect_wifi_retries_and_succeeds(provider, monkeypatch):
-    fake_run = _subprocess_factory(2, success_return=None)
+    fake_run = _wifi_run_factory(connect_fail_times=2)
     monkeypatch.setattr(cp.subprocess, "run", fake_run)
 
     attempts = []
@@ -45,21 +47,49 @@ def test_connect_wifi_retries_and_succeeds(provider, monkeypatch):
 
     ok = provider.connect_wifi("SomeSSID", "password")
     assert ok is True
-    assert fake_run.calls["n"] == 3
+    assert fake_run.connect_calls["n"] == 3
     assert attempts == [("wifi", 2, 3), ("wifi", 3, 3)]
     assert SubsystemRegistry.get("wifi").disabled is False
 
 
 def test_connect_wifi_exhausts_and_disables(provider, monkeypatch):
-    fake_run = _subprocess_factory(99)
+    fake_run = _wifi_run_factory(connect_fail_times=99)
     monkeypatch.setattr(cp.subprocess, "run", fake_run)
 
     with pytest.raises(RuntimeError):
         provider.connect_wifi("SomeSSID")
 
-    assert fake_run.calls["n"] == 3
+    assert fake_run.connect_calls["n"] == 3
     assert SubsystemRegistry.get("wifi").disabled is True
     assert provider.get_device_status().wifi_disabled is True
+
+
+def test_connect_wifi_falls_back_to_hidden_on_key_mgmt_error(provider, monkeypatch):
+    """A hidden AP yields the key-mgmt error on the plain connect; the provider
+    must retry the same attempt with `hidden yes` and succeed without spending
+    the outer retry budget."""
+    commands = []
+
+    def fake_run(cmd, *args, **kwargs):
+        commands.append(cmd)
+        if "connect" in cmd and "hidden" not in cmd:
+            raise subprocess.CalledProcessError(
+                1, cmd, output="",
+                stderr="Error: 802-11-wireless-security.key-mgmt: property is missing.",
+            )
+        return None  # rescan + hidden connect succeed
+
+    monkeypatch.setattr(cp.subprocess, "run", fake_run)
+
+    attempts = []
+    provider.on_retry_attempt = lambda s, a, m: attempts.append((s, a, m))
+
+    ok = provider.connect_wifi("HiddenNet", "secret")
+    assert ok is True
+    assert attempts == []  # succeeded on the first attempt via the hidden retry
+    hidden_connects = [c for c in commands if "connect" in c and "hidden" in c]
+    assert hidden_connects and hidden_connects[-1][-2:] == ["hidden", "yes"]
+    assert SubsystemRegistry.get("wifi").disabled is False
 
 
 def test_scan_wifi_networks_retry_and_disable(provider, monkeypatch):

@@ -524,17 +524,57 @@ class RealCareKeeperProvider(CareKeeperProvider):
         )
 
     def _connect_wifi_once(self, ssid: str, password: str | None = None) -> bool:
-        command = ["nmcli", "device", "wifi", "connect", ssid]
-        if password:
-            command.extend(["password", password])
+        # A radio that was just switched on has an empty scan cache, so NM
+        # cannot see the AP nor its security type and rejects the connect with
+        # "802-11-wireless-security.key-mgmt: property is missing". Refresh the
+        # cache first (best-effort) so a visible AP is known before we connect.
+        self._rescan_wifi()
         try:
-            subprocess.run(command, check=True, text=True, capture_output=True, timeout=25)
+            self._nmcli_wifi_connect(ssid, password, hidden=False)
             return True
         except subprocess.TimeoutExpired:
             raise RuntimeError("เชื่อมต่อ Wi-Fi ใช้เวลานานเกินไป")
         except subprocess.CalledProcessError as e:
-            message = e.stderr.strip() or e.stdout.strip() or str(e)
+            message = self._nmcli_error_message(e)
+            # Hidden APs never broadcast their SSID, so even after a rescan NM
+            # can't infer the security type -> same key-mgmt error. Retry once
+            # flagging the network as hidden; NM then probes for it actively and
+            # derives WPA-PSK from the supplied password itself.
+            if password and "key-mgmt" in message.lower():
+                try:
+                    self._nmcli_wifi_connect(ssid, password, hidden=True)
+                    return True
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError("เชื่อมต่อ Wi-Fi ใช้เวลานานเกินไป")
+                except subprocess.CalledProcessError as e2:
+                    message = self._nmcli_error_message(e2)
             raise RuntimeError(f"เชื่อมต่อ Wi-Fi ไม่สำเร็จ: {message}")
+
+    def _rescan_wifi(self) -> None:
+        """Force NetworkManager to refresh its scan results before a connect.
+        `--rescan yes` blocks until the scan completes, so the AP and its
+        security flags are known by the time we connect. Best-effort: NM
+        rejects a rescan that follows too soon after a previous one, which is
+        harmless here, so any failure is ignored."""
+        try:
+            subprocess.run(
+                ["nmcli", "device", "wifi", "list", "--rescan", "yes"],
+                check=False, text=True, capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+
+    def _nmcli_wifi_connect(self, ssid: str, password: str | None, hidden: bool) -> None:
+        command = ["nmcli", "device", "wifi", "connect", ssid]
+        if password:
+            command.extend(["password", password])
+        if hidden:
+            command.extend(["hidden", "yes"])
+        subprocess.run(command, check=True, text=True, capture_output=True, timeout=25)
+
+    @staticmethod
+    def _nmcli_error_message(exc: subprocess.CalledProcessError) -> str:
+        return (exc.stderr or "").strip() or (exc.stdout or "").strip() or str(exc)
 
     def toggle_bluetooth(self) -> None:
         current_state = self._is_bluetooth_connected()
