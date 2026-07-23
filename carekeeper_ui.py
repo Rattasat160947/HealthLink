@@ -1133,6 +1133,7 @@ class CareKeeperWindow(QMainWindow):
         display_name = self.patient.th_name
         if self.patient.en_name and self.patient.en_name != "-":
             display_name = f"{self.patient.th_name} ({self.patient.en_name})"
+        display_address = self._short_address(self.patient.address)
 
         for name, cid, dob, address in (
             (self.lbl_name, self.lbl_cid, self.lbl_dob, self.lbl_address),
@@ -1141,7 +1142,16 @@ class CareKeeperWindow(QMainWindow):
             name.setText(display_name)
             cid.setText(f"| {self._format_cid(self.patient.cid)}")
             dob.setText(f"เกิด: {self.patient.birth_date}")
-            address.setText(self.patient.address)
+            address.setText(display_address)
+
+    @staticmethod
+    def _short_address(address: str) -> str:
+        return (
+            address
+            .replace("ตำบล", "ต.")
+            .replace("อำเภอ", "อ.")
+            .replace("จังหวัด", "จ.")
+        )
 
     def _console_label(self, text: str, object_name: str, alignment: Qt.AlignmentFlag = Qt.AlignLeft | Qt.AlignVCenter) -> QLabel:
         label = QLabel(text)
