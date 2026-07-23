@@ -1,6 +1,6 @@
 # รายงานผลการทดสอบซอฟต์แวร์ (Software Test Report) — CareKeeper
 
-- **วันที่จัดทำ:** 2 กรกฎาคม 2569 (2026-07-02)
+- **วันที่จัดทำ:** 4 กรกฎาคม 2569 (2026-07-04)
 - **ผู้จัดทำ:** ทีมพัฒนา CareKeeper
 - **ขอบเขต:** Unit test และ Integration test ระดับโมดูลของแอปพลิเคชัน CareKeeper (เครื่องวัดสุขภาพประจำจุดบริการ บน Raspberry Pi)
 
@@ -10,15 +10,15 @@
 
 | ตัวชี้วัด | ค่าที่วัดได้ |
 |---|---|
-| จำนวนกรณีทดสอบ (test cases) ทั้งหมด | **160** |
-| ผ่าน | **160 (100%)** |
+| จำนวนกรณีทดสอบ (test cases) ทั้งหมด | **161** |
+| ผ่าน | **161 (100%)** |
 | ไม่ผ่าน | 0 |
-| ความครอบคลุมของโค้ด (code coverage) โมดูลตรรกะ | **79%** (1,107 statements, พลาด 236) |
+| ความครอบคลุมของโค้ด (code coverage) โมดูลตรรกะ | **79%** (1,128 statements, พลาด 242) |
 | เวลาที่ใช้รันทั้งชุด | **~1.8 วินาที** |
 | การพึ่งพาฮาร์ดแวร์/เครือข่ายจริง | **ไม่มี** — รันซ้ำได้ทุกเครื่อง (deterministic) |
 
 > ก่อนปรับปรุงรอบนี้ ชุดทดสอบมี 52 กรณี (ผ่าน 49, ไม่ผ่าน 3) และ coverage อยู่ที่ **57%**
-> หลังปรับปรุงเพิ่มเป็น 160 กรณี ผ่านทั้งหมด และ coverage เพิ่มขึ้น **+22 จุด เป็น 79%**
+> หลังปรับปรุงเพิ่มเป็น 161 กรณี ผ่านทั้งหมด และ coverage เพิ่มขึ้น **+22 จุด เป็น 79%**
 
 ---
 
@@ -62,13 +62,13 @@
 | คิวออฟไลน์ (SQLite): จัดเก็บ/กู้คืน | `test_queue.py` | 7 |
 | คิวออฟไลน์: worker ส่งข้อมูลเบื้องหลัง | `test_queue_worker.py` | 5 |
 | กลไก retry และสถานะ subsystem | `test_retry_helper.py` | 8 |
-| Wi-Fi / Bluetooth ของตัวเครื่อง | `test_providers_wifi_bt.py` | 7 |
+| Wi-Fi / Bluetooth ของตัวเครื่อง | `test_providers_wifi_bt.py` | 8 |
 | SpO2 ระดับ provider | `test_providers_spo2.py` | 3 |
 | โครงสร้างสถานะอุปกรณ์ | `test_device_status_fields.py` | 1 |
 | การทำงานข้าม thread (GUI ไม่ถูก block) | `test_threading.py` | 4 |
 | GUI: สถานะ disabled และการกดปุ่ม | `test_ui_status_disabled.py` | 6 |
 | GUI: ลำดับการบันทึกและส่งข้อมูล | `test_ui_submit_flow.py` | 3 |
-| **รวม** | | **160** |
+| **รวม** | | **161** |
 
 ---
 
@@ -88,9 +88,9 @@
 | `lib/bp_monitor.py` | 117 | 15 | **87%** |
 | `lib/ups.py` | 81 | 15 | **81%** |
 | `lib/thaiidcard/card.py` | 62 | 18 | **71%** |
-| `carekeeper_providers.py` | 358 | 130 | **64%** |
+| `carekeeper_providers.py` | 379 | 136 | **64%** |
 | `lib/h59_ble/device.py` | 119 | 44 | **63%** |
-| **รวม** | **1,107** | **236** | **79%** |
+| **รวม** | **1,128** | **242** | **79%** |
 
 **ส่วนที่เหลือที่ยังไม่ครอบคลุม** ส่วนใหญ่เป็นโค้ดที่ต้องมีฮาร์ดแวร์/OS จริง ได้แก่ การ scan และ connect BLE จริง (`device.py`), การเรียก `nmcli`/`bluetoothctl`/`iwgetid` บน Raspberry Pi (`carekeeper_providers.py`) และการเปิดพอร์ต Serial จริง (`bp_monitor.py`) ซึ่งเหมาะกับการทดสอบแบบ hardware-in-the-loop มากกว่า unit test (ดูหัวข้อ 7)
 
@@ -124,6 +124,7 @@
 | TC-20 | ดึงประวัติจำกัด 4 รายการ | ข้อมูล 6 รายการ | ได้ 4 รายการล่าสุด |
 | TC-21 | คิวออฟไลน์คงข้อมูลข้ามการรีสตาร์ต | enqueue → เปิดคิวใหม่จากไฟล์เดิม | รายการยังอยู่ครบ |
 | TC-22 | retry แล้วปิด subsystem เมื่อล้มเหลวครบ | ล้มเหลว 3 ครั้งติด | subsystem ถูก disable พร้อมเหตุผล |
+| TC-23 | เชื่อม Wi-Fi ที่ซ่อนชื่อ (hidden SSID) | connect ปกติล้มเหลวด้วย `802-11-wireless-security.key-mgmt: property is missing` + มีรหัสผ่าน | retry อัตโนมัติด้วย `hidden yes` แล้วเชื่อมสำเร็จในความพยายามเดิม |
 
 ---
 
@@ -147,7 +148,7 @@ python -m pytest tests/ --cov=carekeeper_queue --cov=carekeeper_retry \
   --cov=carekeeper_providers --cov=carekeeper_logging --cov=lib \
   --cov-report=html && open htmlcov/index.html
 
-# แสดงรายชื่อกรณีทดสอบทั้ง 160 รายการ
+# แสดงรายชื่อกรณีทดสอบทั้ง 161 รายการ
 python -m pytest tests/ --collect-only -q
 ```
 
