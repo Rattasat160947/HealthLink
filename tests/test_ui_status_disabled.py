@@ -25,7 +25,9 @@ def test_device_status_disabled_greys_out_wifi_indicator(window):
     status = DeviceStatus(wifi_connected=True, wifi_disabled=True, bluetooth_connected=True)
     window._on_status_done(status)
 
-    for _bt, wifi, _battery, _battery_text, _bt_text, wifi_text in window._status_widgets:
+    wifi_clusters = [w for w in window._status_widgets if w[1] is not None]
+    assert wifi_clusters  # the welcome header still carries a Wi-Fi indicator
+    for _bt, wifi, _battery, _battery_text, _bt_text, wifi_text in wifi_clusters:
         assert wifi.connected is False
         assert wifi_text.text() == "ปิดใช้งาน"
 

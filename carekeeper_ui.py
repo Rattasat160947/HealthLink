@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QRectF, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QObject, QRectF, QSize, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QBrush, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -315,6 +315,51 @@ class PowerButton(QWidget):
 class ToastLabel(QLabel):
     def mousePressEvent(self, event) -> None:
         self.hide()
+
+
+class ElidedLabel(QLabel):
+    """QLabel that truncates its text with a trailing ellipsis when the layout
+    gives it less width than the text needs, instead of forcing the row to
+    overflow. The patient header used plain QLabels, so a long name pushed past
+    the citizen-ID and the two collided on the Pi's narrow fullscreen. Keeps the
+    full text available via text() so callers still read the real value."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._full_text = text
+
+    def setText(self, text: str) -> None:
+        self._full_text = text
+        self._elide_to_width()
+        self.updateGeometry()
+
+    def text(self) -> str:
+        return self._full_text
+
+    def sizeHint(self):
+        # Base the preferred width on the FULL text, never the currently-elided
+        # text. Otherwise an elision that happens while the page is hidden (width
+        # ~0) shrinks the hint and the label stays collapsed even after its page
+        # is shown with plenty of room.
+        hint = super().sizeHint()
+        hint.setWidth(self.fontMetrics().horizontalAdvance(self._full_text) + 2)
+        return hint
+
+    def minimumSizeHint(self):
+        # Let the layout shrink us below the natural text width; we elide to
+        # whatever width we actually receive.
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide_to_width()
+
+    def _elide_to_width(self) -> None:
+        elided = self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, max(0, self.width()))
+        super().setText(elided)
+
 
 class PopupOverlay(QWidget):
     """Full-window dimmed overlay with a centered message card (used for important confirmations)."""
@@ -1041,36 +1086,45 @@ class CareKeeperWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        bt = BluetoothIndicator()
-        wifi = WifiIndicator()
         battery = BatteryIndicator()
         battery_text = QLabel("0%")
         battery_text.setObjectName("ConsoleBatteryLabel")
-        bt_text = QLabel("OFF")
-        bt_text.setObjectName("StatusText")
-        wifi_text = QLabel("OFF")
-        wifi_text.setObjectName("StatusText")
 
-        wifi.clicked.connect(self._open_wifi_selector)
-        bt.clicked.connect(self._open_bluetooth_selector)
+        # Bluetooth/Wi-Fi live only on the welcome screen. On the measure and
+        # summary headers they are dropped so the wide status cluster stops
+        # squeezing the patient name/ID; only battery stays there.
+        bt = wifi = bt_text = wifi_text = None
+        if welcome:
+            bt = BluetoothIndicator()
+            wifi = WifiIndicator()
+            bt_text = QLabel("OFF")
+            bt_text.setObjectName("StatusText")
+            wifi_text = QLabel("OFF")
+            wifi_text.setObjectName("StatusText")
 
-        bt_card = QFrame()
-        bt_card.setObjectName("StatusPill")
-        bt_card.setFixedSize(116, 42)
-        bt_layout = QHBoxLayout(bt_card)
-        bt_layout.setContentsMargins(8, 4, 10, 4)
-        bt_layout.setSpacing(4)
-        bt_layout.addWidget(bt, alignment=Qt.AlignCenter)
-        bt_layout.addWidget(bt_text, alignment=Qt.AlignCenter)
+            wifi.clicked.connect(self._open_wifi_selector)
+            bt.clicked.connect(self._open_bluetooth_selector)
 
-        wifi_card = QFrame()
-        wifi_card.setObjectName("StatusPill")
-        wifi_card.setFixedSize(92, 42)
-        wifi_layout = QHBoxLayout(wifi_card)
-        wifi_layout.setContentsMargins(8, 4, 10, 4)
-        wifi_layout.setSpacing(4)
-        wifi_layout.addWidget(wifi, alignment=Qt.AlignCenter)
-        wifi_layout.addWidget(wifi_text, alignment=Qt.AlignCenter)
+            bt_card = QFrame()
+            bt_card.setObjectName("StatusPill")
+            bt_card.setFixedSize(116, 42)
+            bt_layout = QHBoxLayout(bt_card)
+            bt_layout.setContentsMargins(8, 4, 10, 4)
+            bt_layout.setSpacing(4)
+            bt_layout.addWidget(bt, alignment=Qt.AlignCenter)
+            bt_layout.addWidget(bt_text, alignment=Qt.AlignCenter)
+
+            wifi_card = QFrame()
+            wifi_card.setObjectName("StatusPill")
+            wifi_card.setFixedSize(92, 42)
+            wifi_layout = QHBoxLayout(wifi_card)
+            wifi_layout.setContentsMargins(8, 4, 10, 4)
+            wifi_layout.setSpacing(4)
+            wifi_layout.addWidget(wifi, alignment=Qt.AlignCenter)
+            wifi_layout.addWidget(wifi_text, alignment=Qt.AlignCenter)
+
+            layout.addWidget(bt_card)
+            layout.addWidget(wifi_card)
 
         battery_card = QFrame()
         battery_card.setObjectName("BatteryPill")
@@ -1080,9 +1134,6 @@ class CareKeeperWindow(QMainWindow):
         battery_layout.setSpacing(6)
         battery_layout.addWidget(battery, alignment=Qt.AlignCenter)
         battery_layout.addWidget(battery_text, alignment=Qt.AlignCenter)
-
-        layout.addWidget(bt_card)
-        layout.addWidget(wifi_card)
         layout.addWidget(battery_card)
 
         if not hasattr(self, "_status_widgets"):
@@ -1095,8 +1146,6 @@ class CareKeeperWindow(QMainWindow):
             self.bat_ind_welcome = battery
             self.lbl_bat_welcome = battery_text
         else:
-            self.bluetooth_indicator = bt
-            self.wifi_indicator = wifi
             self.battery_indicator = battery
             self.lbl_battery_text = battery_text
 
@@ -1110,16 +1159,19 @@ class CareKeeperWindow(QMainWindow):
         for bt, wifi, battery, battery_text, bt_text, wifi_text in getattr(self, "_status_widgets", []):
             battery_text.setText("--%" if result.battery_percent is None else f"{result.battery_percent}%")
             battery.set_percent(result.battery_percent)
-            wifi.set_connected(result.wifi_connected and not result.wifi_disabled)
-            bt.set_connected(result.bluetooth_connected and not result.bluetooth_disabled)
-            bt_text.setText(
-                "ปิดใช้งาน" if result.bluetooth_disabled
-                else ("CONNECTED" if result.bluetooth_connected else "OFF")
-            )
-            wifi_text.setText(
-                "ปิดใช้งาน" if result.wifi_disabled
-                else ("ON" if result.wifi_connected else "OFF")
-            )
+            # Wi-Fi/Bluetooth are absent on the measure and summary headers.
+            if wifi is not None:
+                wifi.set_connected(result.wifi_connected and not result.wifi_disabled)
+                wifi_text.setText(
+                    "ปิดใช้งาน" if result.wifi_disabled
+                    else ("ON" if result.wifi_connected else "OFF")
+                )
+            if bt is not None:
+                bt.set_connected(result.bluetooth_connected and not result.bluetooth_disabled)
+                bt_text.setText(
+                    "ปิดใช้งาน" if result.bluetooth_disabled
+                    else ("CONNECTED" if result.bluetooth_connected else "OFF")
+                )
 
         if hasattr(self, "btn_bp") and self.bp_cooldown_seconds == 0:
             if result.bp_disabled:
@@ -1524,7 +1576,18 @@ class CareKeeperWindow(QMainWindow):
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(20, 10, 18, 10)
         footer_layout.setSpacing(16)
-        self.lbl_system_message = self._console_label("SYSTEM: รอคำสั่งวัดค่า", "SystemMessageNeutral")
+        # Same "back to home" control as the summary page, bottom-left, so the
+        # operator can bail out of a measurement without finishing it.
+        self.btn_back_home_measure = QPushButton("ย้อนกลับหน้าแรก")
+        self.btn_back_home_measure.setObjectName("BtnBack")
+        self.btn_back_home_measure.setFixedSize(210, 50)
+        self.btn_back_home_measure.clicked.connect(self._reset_session)
+        footer_layout.addWidget(self.btn_back_home_measure)
+        # Elides so that, with the back button now sharing the row, a long status
+        # line shrinks instead of pushing the buttons off a narrow screen.
+        self.lbl_system_message = ElidedLabel("SYSTEM: รอคำสั่งวัดค่า")
+        self.lbl_system_message.setObjectName("SystemMessageNeutral")
+        self.lbl_system_message.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.lbl_measure_count = self._console_label("วัดค่าสำเร็จแล้ว 0 รายการ", "FooterHint")
         footer_layout.addWidget(self.lbl_system_message, 2)
         footer_layout.addWidget(self.lbl_measure_count, 1)
@@ -1693,7 +1756,11 @@ class CareKeeperWindow(QMainWindow):
         info.setSpacing(4)
         row1 = QHBoxLayout()
         row1.setSpacing(10)
-        lbl_name = self._console_label("-", "HeaderNameConsole")
+        # Name elides with "…" so a long name can never overrun the CID beside
+        # it; the CID keeps its natural width and stays fully visible.
+        lbl_name = ElidedLabel("-")
+        lbl_name.setObjectName("HeaderNameConsole")
+        lbl_name.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         lbl_cid = self._console_label("-", "HeaderCidConsole")
         row1.addWidget(lbl_name)
         row1.addWidget(lbl_cid)
@@ -1701,7 +1768,9 @@ class CareKeeperWindow(QMainWindow):
         row2 = QHBoxLayout()
         row2.setSpacing(12)
         lbl_dob = self._console_label("เกิด: -", "HeaderSubConsole")
-        lbl_address = self._console_label("-", "HeaderSubConsole")
+        lbl_address = ElidedLabel("-")
+        lbl_address.setObjectName("HeaderSubConsole")
+        lbl_address.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         row2.addWidget(lbl_dob)
         row2.addWidget(lbl_address, 1)
         info.addLayout(row1)
