@@ -524,6 +524,21 @@ class RealCareKeeperProvider(CareKeeperProvider):
         )
 
     def _connect_wifi_once(self, ssid: str, password: str | None = None) -> bool:
+        # Remember the WiFi connection currently in use before we tear it down,
+        # so a failed attempt can put it back. `nmcli device wifi connect`
+        # deactivates the active link first; if the new one then fails the Pi is
+        # left with no network at all, killing the SSH/VNC session used to
+        # administer it (and leaving no way to even read `hostname -I`).
+        previous = self._active_wifi_connection()
+
+        # `nmcli device wifi connect` reactivates any saved profile for this
+        # SSID using its *stored* password and silently ignores the new one we
+        # pass -- so once the router password changes, the stale profile can
+        # never authenticate again. Delete it first so the password the user
+        # just entered is the one actually used.
+        if password:
+            self._forget_wifi_profile(ssid)
+
         # A radio that was just switched on has an empty scan cache, so NM
         # cannot see the AP nor its security type and rejects the connect with
         # "802-11-wireless-security.key-mgmt: property is missing". Refresh the
@@ -533,6 +548,7 @@ class RealCareKeeperProvider(CareKeeperProvider):
             self._nmcli_wifi_connect(ssid, password, hidden=False)
             return True
         except subprocess.TimeoutExpired:
+            self._restore_wifi_connection(previous, ssid)
             raise RuntimeError("เชื่อมต่อ Wi-Fi ใช้เวลานานเกินไป")
         except subprocess.CalledProcessError as e:
             message = self._nmcli_error_message(e)
@@ -545,10 +561,58 @@ class RealCareKeeperProvider(CareKeeperProvider):
                     self._nmcli_wifi_connect(ssid, password, hidden=True)
                     return True
                 except subprocess.TimeoutExpired:
+                    self._restore_wifi_connection(previous, ssid)
                     raise RuntimeError("เชื่อมต่อ Wi-Fi ใช้เวลานานเกินไป")
                 except subprocess.CalledProcessError as e2:
                     message = self._nmcli_error_message(e2)
+            self._restore_wifi_connection(previous, ssid)
             raise RuntimeError(f"เชื่อมต่อ Wi-Fi ไม่สำเร็จ: {message}")
+
+    def _active_wifi_connection(self) -> str | None:
+        """Name of the Wi-Fi connection profile currently active, if any, so it
+        can be restored after a failed connect. Best-effort: returns None when
+        nothing is up or nmcli is unavailable."""
+        try:
+            output = subprocess.check_output(
+                ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"],
+                text=True, errors="ignore", timeout=5,
+            )
+        except Exception:
+            return None
+        for line in output.splitlines():
+            # `-t` output is colon-separated (NAME:TYPE); a literal colon inside
+            # NAME is escaped as "\:", so the real separator is the last colon.
+            name, sep, ctype = line.rpartition(":")
+            if sep and ctype == "802-11-wireless" and name:
+                return name.replace("\\:", ":")
+        return None
+
+    def _forget_wifi_profile(self, ssid: str) -> None:
+        """Delete any saved NM profile named after this SSID so a changed
+        password takes effect (see `_connect_wifi_once`). Best-effort: a missing
+        profile just makes nmcli exit non-zero, which we ignore."""
+        try:
+            subprocess.run(
+                ["nmcli", "connection", "delete", "id", ssid],
+                check=False, capture_output=True, text=True, timeout=8,
+            )
+        except Exception:
+            pass
+
+    def _restore_wifi_connection(self, name: str | None, failed_ssid: str) -> None:
+        """Bring the previously active Wi-Fi connection back up after a failed
+        connect, so the device is never left offline (which would kill the
+        SSH/VNC session used to administer it). No-op when there was no previous
+        connection, or when it is the very network we just failed to join."""
+        if not name or name == failed_ssid:
+            return
+        try:
+            subprocess.run(
+                ["nmcli", "connection", "up", "id", name],
+                check=False, capture_output=True, text=True, timeout=20,
+            )
+        except Exception:
+            pass
 
     def _rescan_wifi(self) -> None:
         """Force NetworkManager to refresh its scan results before a connect.
@@ -594,32 +658,59 @@ class RealCareKeeperProvider(CareKeeperProvider):
 
     def _scan_bluetooth_devices_once(self) -> list[tuple[str, str]]:
         try:
-            subprocess.run(["bluetoothctl", "scan", "on"], timeout=8, capture_output=True, text=True)
-        except Exception:
-            pass
-        finally:
-            try:
-                subprocess.run(["bluetoothctl", "scan", "off"], timeout=4, capture_output=True, text=True)
-            except Exception:
-                pass
-
-        try:
-            output = subprocess.check_output(
-                ["bluetoothctl", "devices"],
-                text=True,
-                errors="ignore",
-                timeout=6,
-            )
-            devices = []
-            for line in output.splitlines():
-                parts = line.strip().split(" ", 2)
-                if len(parts) >= 3 and parts[0] == "Device":
-                    devices.append((parts[2], parts[1]))
-            return devices
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("สแกน Bluetooth ใช้เวลานานเกินไป")
+            raw = asyncio.run(self._discover_ble_devices())
         except Exception as e:
             raise RuntimeError(f"ไม่สามารถสแกน Bluetooth ได้: {e}")
+        return self._clean_ble_devices(raw)
+
+    async def _discover_ble_devices(self) -> list[tuple[str | None, str | None, int | None]]:
+        """Scan for BLE devices with bleak -- the same stack the H59 reader uses.
+
+        `bluetoothctl devices` lists the adapter's entire ever-seen cache and
+        renders unnamed devices as a bare MAC, which is why the picker showed
+        ~10 stale/unidentifiable signals when only a couple were actually
+        nearby. `BleakScanner.discover` returns only devices advertising during
+        this window, each with its advertised name and RSSI."""
+        from bleak import BleakScanner
+
+        found = await BleakScanner.discover(timeout=8.0, return_adv=True)
+        return [
+            ((adv.local_name or device.name), device.address, adv.rssi)
+            for device, adv in found.values()
+        ]
+
+    @staticmethod
+    def _clean_ble_devices(
+        raw: list[tuple[str | None, str | None, int | None]]
+    ) -> list[tuple[str, str]]:
+        """Turn raw scan results into a clean (name, address) picklist.
+
+        Drops devices with no advertised name -- their label would just be the
+        MAC address, which the operator can't identify and is exactly the noise
+        being complained about -- then orders by signal strength so the
+        physically closest device comes first. De-dupes by address."""
+        by_strength: list[tuple[int, str, str]] = []
+        for name, address, rssi in raw:
+            name = (name or "").strip()
+            address = (address or "").strip()
+            if not address:
+                continue
+            # An unnamed device reports its MAC as the "name" (colon- or
+            # dash-separated). Treat that as no name and skip it.
+            if not name or name.replace("-", ":").upper() == address.upper():
+                continue
+            by_strength.append((rssi if rssi is not None else -999, name, address))
+
+        by_strength.sort(key=lambda t: t[0], reverse=True)  # strongest first
+
+        seen: set[str] = set()
+        devices: list[tuple[str, str]] = []
+        for _rssi, name, address in by_strength:
+            key = address.upper()
+            if key not in seen:
+                seen.add(key)
+                devices.append((name, address))
+        return devices
 
     def connect_bluetooth(self, address: str) -> bool:
         return retry_with_notify(
