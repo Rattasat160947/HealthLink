@@ -185,12 +185,33 @@ def test_scan_wifi_networks_retry_and_disable(provider, monkeypatch):
         calls["n"] += 1
         raise subprocess.CalledProcessError(1, args[0])
 
+    monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: None)  # neutralize rescan
     monkeypatch.setattr(cp.subprocess, "check_output", fake_check_output)
 
     with pytest.raises(RuntimeError):
         provider.scan_wifi_networks()
     assert calls["n"] == 3
     assert SubsystemRegistry.get("wifi").disabled is True
+
+
+def test_scan_wifi_networks_rescans_then_returns_all_ssids(provider, monkeypatch):
+    """The scan forces a fresh rescan first, then returns every SSID the list
+    reports -- all APs in range, not only saved/known networks."""
+    ran = []
+
+    def fake_run(cmd, *args, **kwargs):
+        ran.append(cmd)
+        return None
+
+    monkeypatch.setattr(cp.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        cp.subprocess, "check_output",
+        lambda *a, **k: "HomeWiFi\nCafe_Guest\nNeighbor_5G\n",
+    )
+
+    networks = provider.scan_wifi_networks()
+    assert networks == ["HomeWiFi", "Cafe_Guest", "Neighbor_5G"]
+    assert any("--rescan" in c and "yes" in c for c in ran)  # a rescan was forced first
 
 
 def test_connect_bluetooth_retry_and_disable(provider, monkeypatch):

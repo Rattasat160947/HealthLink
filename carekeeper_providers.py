@@ -503,9 +503,15 @@ class RealCareKeeperProvider(CareKeeperProvider):
         )
 
     def _scan_wifi_networks_once(self) -> list[str]:
+        # Force a fresh scan first so the list reflects every AP currently in
+        # range, not just whatever NetworkManager happened to have cached from
+        # its last periodic scan (a just-appeared network would otherwise be
+        # missing). `--rescan no` on the list then reads that fresh cache without
+        # triggering a second scan NM would reject for coming too soon.
+        self._rescan_wifi()
         try:
             output = subprocess.check_output(
-                ["nmcli", "-t", "-f", "SSID", "device", "wifi", "list"],
+                ["nmcli", "-t", "-f", "SSID", "device", "wifi", "list", "--rescan", "no"],
                 text=True,
                 errors="ignore",
                 timeout=10,
