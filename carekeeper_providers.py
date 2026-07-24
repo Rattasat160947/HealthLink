@@ -161,6 +161,9 @@ class CareKeeperProvider:
     def shutdown_device(self) -> bool:
         raise NotImplementedError
 
+    def get_ip_address(self) -> str:
+        return ""
+
 
 class MockCareKeeperProvider(CareKeeperProvider):
     """Development provider for UI preview without real hardware."""
@@ -246,6 +249,9 @@ class MockCareKeeperProvider(CareKeeperProvider):
     def shutdown_device(self) -> bool:
         print("[Mock] Shutdown device")
         return True
+
+    def get_ip_address(self) -> str:
+        return "192.168.1.123"
 
 
 class RealCareKeeperProvider(CareKeeperProvider):
@@ -752,3 +758,17 @@ class RealCareKeeperProvider(CareKeeperProvider):
             raise RuntimeError(f"ปิดเครื่องไม่สำเร็จ: {message}")
         except Exception as e:
             raise RuntimeError(f"ปิดเครื่องไม่สำเร็จ: {e}")
+
+    def get_ip_address(self) -> str:
+        """Current IP address(es) from `hostname -I`, shown in the on-screen
+        'ดู ID' dialog so the operator can find the device to SSH/VNC into after
+        the network changes. Space-separated (IPv4 first); '' when offline."""
+        if sys.platform == "win32":
+            return ""
+        try:
+            output = subprocess.check_output(
+                ["hostname", "-I"], text=True, errors="ignore", timeout=4
+            )
+            return output.strip()
+        except Exception:
+            return ""

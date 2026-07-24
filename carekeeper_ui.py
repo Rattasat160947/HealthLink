@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import getpass
+import socket
 import sys
 import time
 from dataclasses import dataclass
@@ -46,6 +48,25 @@ PROJECT_DIR = Path(__file__).resolve().parent
 STYLE_DIR = PROJECT_DIR / "style"
 APP_FONT_FAMILY = "Noto Sans Thai"
 NUMBER_FONT_FAMILY = "Asimov-MwEn"
+
+# Shared look for the system pop-up dialogs (power menu, device ID, exit).
+# These are modal QMessageBoxes, so they never touch the main window layout.
+_SYSTEM_DIALOG_STYLE = """
+    QMessageBox { background-color: #ffffff; }
+    QLabel { font-size: 20px; font-weight: 700; color: #0b1f33; }
+    QPushButton {
+        font-size: 18px;
+        font-weight: 800;
+        min-height: 48px;
+        min-width: 138px;
+        border-radius: 12px;
+        background-color: #eef2f6;
+        color: #0b1f33;
+        border: 2px solid #9ec9d6;
+        padding: 4px 10px;
+    }
+    QPushButton:hover { background-color: #dbe7ee; }
+"""
 
 def _style_asset(name: str) -> Path:
     return STYLE_DIR / name
@@ -246,7 +267,7 @@ class PowerButton(QWidget):
         super().__init__(parent)
         self.setFixedSize(56, 56)
         self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("รีสตาร์ท / ปิดเครื่อง")
+        self.setToolTip("เมนูระบบ — ดู ID/IP, ปิดหน้าจอ, รีสตาร์ท, ปิดเครื่อง")
         self.hovered = False
 
     def enterEvent(self, event) -> None:
@@ -772,37 +793,85 @@ class CareKeeperWindow(QMainWindow):
 
     def _open_power_menu(self) -> None:
         box = QMessageBox(self)
-        box.setWindowTitle("รีสตาร์ท / ปิดเครื่อง")
+        box.setWindowTitle("เมนูระบบ")
         box.setText("ต้องการดำเนินการใด?")
         box.setIcon(QMessageBox.Question)
+        btn_view_id = box.addButton("ดู IP ", QMessageBox.ActionRole)
+        btn_exit_ui = box.addButton("ปิดหน้าแสดงผล", QMessageBox.ActionRole)
         btn_reboot = box.addButton("รีสตาร์ทเครื่อง", QMessageBox.ActionRole)
         btn_shutdown = box.addButton("ปิดเครื่อง", QMessageBox.DestructiveRole)
         btn_cancel = box.addButton("ยกเลิก", QMessageBox.RejectRole)
         box.setDefaultButton(btn_cancel)
-        box.setStyleSheet(
-            """
-            QMessageBox { background-color: #ffffff; }
-            QLabel { font-size: 21px; font-weight: 700; color: #0b1f33; }
-            QPushButton {
-                font-size: 19px;
-                font-weight: 800;
-                min-height: 48px;
-                min-width: 150px;
-                border-radius: 12px;
-                background-color: #eef2f6;
-                color: #0b1f33;
-                border: 2px solid #9ec9d6;
-                padding: 4px 10px;
-            }
-            QPushButton:hover { background-color: #dbe7ee; }
-            """
-        )
+        box.setStyleSheet(_SYSTEM_DIALOG_STYLE)
         box.exec()
         clicked = box.clickedButton()
         if clicked == btn_reboot:
             self._do_reboot()
         elif clicked == btn_shutdown:
             self._do_shutdown()
+        elif clicked == btn_view_id:
+            self._show_device_id()
+        elif clicked == btn_exit_ui:
+            self._exit_ui()
+
+    def _show_device_id(self) -> None:
+        """Show the device's current network identity (IP / hostname / MAC) so
+        the operator can SSH/VNC in after the network changes -- the on-screen
+        answer to "what's my IP now?" without needing to already be remoted in."""
+        try:
+            ip = self.provider.get_ip_address()
+        except Exception:
+            ip = ""
+        hostname = socket.gethostname()
+        mac = getattr(self.provider, "device_mac", "") or "-"
+        user = getpass.getuser()
+
+        if ip:
+            primary = ip.split()[0]
+            body = (
+                f"IP:  {ip}\n"
+                f"Hostname:  {hostname}\n"
+                f"MAC:  {mac}\n\n"
+                f"SSH:  ssh {user}@{primary}"
+            )
+        else:
+            body = (
+                "ยังไม่พบ IP — เครื่องอาจยังไม่ได้เชื่อมต่อเครือข่าย\n"
+                f"Hostname:  {hostname}\n"
+                f"MAC:  {mac}"
+            )
+
+        box = QMessageBox(self)
+        box.setWindowTitle("ข้อมูลเครื่อง (Device ID)")
+        box.setText(body)
+        box.setIcon(QMessageBox.Information)
+        # Must add a button explicitly: a button-less QMessageBox has no way to
+        # close in the frameless full-screen kiosk, trapping the operator.
+        box.addButton("ปิด", QMessageBox.AcceptRole)
+        # Let the operator select/copy the IP or ssh line if a keyboard is attached.
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        box.setStyleSheet(_SYSTEM_DIALOG_STYLE)
+        box.exec()
+
+    def _exit_ui(self) -> None:
+        """Close the kiosk UI back to the desktop without powering off, so the
+        Pi can be configured locally when remote access is unavailable. The app
+        is launched by labwc autostart, so quitting simply drops to the desktop
+        and does not relaunch on its own."""
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("ปิดหน้าแสดงผล")
+        confirm.setText(
+            "ออกจากหน้าจอแอปไปที่ Desktop?\n"
+            "ต้องต่อจอ/คีย์บอร์ด หรือ VNC เพื่อเปิดแอปกลับ"
+        )
+        confirm.setIcon(QMessageBox.Warning)
+        btn_yes = confirm.addButton("ปิดหน้าแสดงผล", QMessageBox.AcceptRole)
+        btn_no = confirm.addButton("ยกเลิก", QMessageBox.RejectRole)
+        confirm.setDefaultButton(btn_no)
+        confirm.setStyleSheet(_SYSTEM_DIALOG_STYLE)
+        confirm.exec()
+        if confirm.clickedButton() == btn_yes:
+            QApplication.quit()
 
     def _do_reboot(self) -> None:
         self.btn_power.setEnabled(False)
