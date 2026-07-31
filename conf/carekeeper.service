@@ -7,8 +7,13 @@ Wants=pcscd.service
 ExecStart=/home/cpe05/Care_Keeper/carekeeper/bin/python3 /home/cpe05/Care_Keeper/main_real.py
 WorkingDirectory=/home/cpe05/Care_Keeper
 User=cpe05
-Restart=on-failure
-RestartSec=5
+# Keep the kiosk up: relaunch on a crash AND on a reboot (WantedBy below).
+Restart=always
+RestartSec=3
+# ...except when the "close display" button exits with this code on purpose,
+# so a deliberate close drops to the desktop and stays there instead of
+# relaunching. Must match EXIT_CODE_CLOSE_DISPLAY in carekeeper_ui.py.
+RestartPreventExitStatus=42
 Environment=DISPLAY=:0
 # ถ้าเครื่องนี้รันด้วย Wayland compositor (เช่น cage/wayfire) แทน X
 # ให้ลบ DISPLAY ด้านบนออก แล้วเปิด 2 บรรทัดนี้แทน (ปรับเลข user id ตามจริง)

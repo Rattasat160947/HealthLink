@@ -49,6 +49,12 @@ STYLE_DIR = PROJECT_DIR / "style"
 APP_FONT_FAMILY = "Noto Sans Thai"
 NUMBER_FONT_FAMILY = "Asimov-MwEn"
 
+# Exit status the "close display" button uses. systemd (see conf/carekeeper.service)
+# is told to auto-restart the kiosk on every exit EXCEPT this one, via
+# RestartPreventExitStatus -- so a deliberate close drops to the desktop and
+# stays there, while a real crash and a reboot still bring the GUI back.
+EXIT_CODE_CLOSE_DISPLAY = 42
+
 # Shared look for the system pop-up dialogs (power menu, device ID, exit).
 # These are modal QMessageBoxes, so they never touch the main window layout.
 _SYSTEM_DIALOG_STYLE = """
@@ -841,10 +847,10 @@ class CareKeeperWindow(QMainWindow):
         box.setWindowTitle("เมนูระบบ")
         box.setText("ต้องการดำเนินการใด?")
         box.setIcon(QMessageBox.Question)
-        btn_view_id = box.addButton("ดู IP ", QMessageBox.ActionRole)
-        btn_exit_ui = box.addButton("ปิดหน้าแสดงผล", QMessageBox.ActionRole)
+        btn_exit_ui = box.addButton("ปิดหน้าจอ", QMessageBox.ActionRole)
         btn_reboot = box.addButton("รีสตาร์ทเครื่อง", QMessageBox.ActionRole)
         btn_shutdown = box.addButton("ปิดเครื่อง", QMessageBox.DestructiveRole)
+        btn_view_id = box.addButton("ดู IP ", QMessageBox.ActionRole)
         btn_cancel = box.addButton("ยกเลิก", QMessageBox.RejectRole)
         box.setDefaultButton(btn_cancel)
         box.setStyleSheet(_SYSTEM_DIALOG_STYLE)
@@ -900,23 +906,27 @@ class CareKeeperWindow(QMainWindow):
 
     def _exit_ui(self) -> None:
         """Close the kiosk UI back to the desktop without powering off, so the
-        Pi can be configured locally when remote access is unavailable. The app
-        is launched by labwc autostart, so quitting simply drops to the desktop
-        and does not relaunch on its own."""
+        Pi can be configured locally when remote access is unavailable.
+
+        Under systemd the service auto-restarts the app, so a plain quit would
+        just relaunch after a few seconds. Exiting with EXIT_CODE_CLOSE_DISPLAY
+        (whitelisted via RestartPreventExitStatus in conf/carekeeper.service)
+        tells systemd this exit was deliberate: the GUI stays down until the next
+        reboot or a manual start, while crashes still auto-recover."""
         confirm = QMessageBox(self)
-        confirm.setWindowTitle("ปิดหน้าแสดงผล")
+        confirm.setWindowTitle("ปิดหน้าจอ")
         confirm.setText(
-            "ออกจากหน้าจอแอปไปที่ Desktop?\n"
-            "ต้องต่อจอ/คีย์บอร์ด หรือ VNC เพื่อเปิดแอปกลับ"
+            "ออกจากหน้าจอแอปไปที่หน้าหลัก?\n"
+            "ต้องปิดเเละเปิดเครื่องเพื่อเปิดแอปกลับ"
         )
         confirm.setIcon(QMessageBox.Warning)
-        btn_yes = confirm.addButton("ปิดหน้าแสดงผล", QMessageBox.AcceptRole)
+        btn_yes = confirm.addButton("ปิดหน้าจอ", QMessageBox.AcceptRole)
         btn_no = confirm.addButton("ยกเลิก", QMessageBox.RejectRole)
         confirm.setDefaultButton(btn_no)
         confirm.setStyleSheet(_SYSTEM_DIALOG_STYLE)
         confirm.exec()
         if confirm.clickedButton() == btn_yes:
-            QApplication.quit()
+            QApplication.exit(EXIT_CODE_CLOSE_DISPLAY)
 
     def _do_reboot(self) -> None:
         self.btn_power.setEnabled(False)
