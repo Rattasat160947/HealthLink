@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import getpass
+import os
 import socket
 import sys
 import time
@@ -908,11 +909,12 @@ class CareKeeperWindow(QMainWindow):
         """Close the kiosk UI back to the desktop without powering off, so the
         Pi can be configured locally when remote access is unavailable.
 
-        Under systemd the service auto-restarts the app, so a plain quit would
-        just relaunch after a few seconds. Exiting with EXIT_CODE_CLOSE_DISPLAY
-        (whitelisted via RestartPreventExitStatus in conf/carekeeper.service)
-        tells systemd this exit was deliberate: the GUI stays down until the next
-        reboot or a manual start, while crashes still auto-recover."""
+        systemd keeps the kiosk alive (Restart=on-failure), so the exit has to
+        look deliberate or the service just relaunches a few seconds later. We
+        exit with EXIT_CODE_CLOSE_DISPLAY, which conf/carekeeper.service
+        whitelists via RestartPreventExitStatus -- systemd then leaves the app
+        down until the next reboot or a manual start, while real crashes still
+        auto-recover."""
         confirm = QMessageBox(self)
         confirm.setWindowTitle("ปิดหน้าจอ")
         confirm.setText(
@@ -926,7 +928,12 @@ class CareKeeperWindow(QMainWindow):
         confirm.setStyleSheet(_SYSTEM_DIALOG_STYLE)
         confirm.exec()
         if confirm.clickedButton() == btn_yes:
-            QApplication.exit(EXIT_CODE_CLOSE_DISPLAY)
+            # Hard exit, not QApplication.quit(): a normal Qt teardown while a
+            # background QThread (e.g. the periodic status poll) is still running
+            # aborts with a non-zero status, which systemd's on-failure would
+            # relaunch -- the "closes then reappears" bug. os._exit delivers
+            # exactly EXIT_CODE_CLOSE_DISPLAY every time, so the whitelist holds.
+            os._exit(EXIT_CODE_CLOSE_DISPLAY)
 
     def _do_reboot(self) -> None:
         self.btn_power.setEnabled(False)
