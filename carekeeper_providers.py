@@ -304,7 +304,10 @@ class RealCareKeeperProvider(CareKeeperProvider):
     def measure_blood_pressure(self) -> BloodPressureReading:
         from lib.bp_monitor import BPMonitor
 
-        monitor = BPMonitor(port=self.bp_port, timeout=120)
+        port = self._resolve_bp_port()
+        if port != self.bp_port:
+            print(f"[BP] auto-detected serial port: {port}")
+        monitor = BPMonitor(port=port, timeout=120)
         retry_with_notify(
             monitor.connect,
             subsystem="bp_monitor",
@@ -323,6 +326,46 @@ class RealCareKeeperProvider(CareKeeperProvider):
             systolic=result.sys,
             diastolic=result.dia,
             pulse=result.pul,
+        )
+
+    # USB vendor IDs of common USB-serial bridges (CH34x, CP210x, FTDI,
+    # Prolific, Espressif native USB). Only used to PREFER the BP monitor's
+    # ESP32 bridge when several USB-serial ports are present; detection still
+    # falls back to the sole USB-serial port otherwise.
+    _BP_USB_SERIAL_VIDS = {0x1A86, 0x10C4, 0x0403, 0x067B, 0x303A}
+
+    def _resolve_bp_port(self) -> str:
+        """Serial port of the BP monitor, auto-detected so it keeps working when
+        the /dev/ttyUSB* number changes without editing .env.
+
+        Precedence: an explicit CAREKEEPER_BP_PORT that is still plugged in wins;
+        otherwise scan USB-serial adapters (the BP monitor is the only one on the
+        kiosk), preferring a known ESP32 bridge chip, then the sole USB-serial
+        port. Read-only -- it never opens or writes to a port, so it cannot
+        trigger a real, cuff-inflating measurement."""
+        from serial.tools import list_ports
+
+        try:
+            ports = list(list_ports.comports())
+        except Exception:
+            ports = []
+        present = {p.device for p in ports}
+
+        configured = (self.bp_port or "").strip()
+        if configured and configured.lower() != "auto" and configured in present:
+            return configured
+
+        usb_ports = [p for p in ports if getattr(p, "vid", None) is not None]
+        for p in usb_ports:
+            if p.vid in self._BP_USB_SERIAL_VIDS:
+                return p.device
+        if usb_ports:
+            return usb_ports[0].device
+
+        if configured and configured.lower() != "auto":
+            return configured  # let BPMonitor raise a clear "port not found"
+        raise RuntimeError(
+            "ไม่พบพอร์ตเครื่องวัดความดัน (ไม่มีอุปกรณ์ USB serial เสียบอยู่)"
         )
 
     def measure_spo2(self) -> int:

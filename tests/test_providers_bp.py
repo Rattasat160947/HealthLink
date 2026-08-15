@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import serial
 import pytest
 
@@ -9,13 +11,23 @@ from carekeeper_retry import SubsystemRegistry
 from tests.fakes.fake_serial import FakeSerialFactory
 
 
+def _fake_port(device, vid=0x1A86):
+    """Stand-in for serial.tools.list_ports.comports() entries."""
+    return SimpleNamespace(device=device, vid=vid, pid=None, description=device)
+
+
 @pytest.fixture
-def provider():
+def provider(monkeypatch):
     p = cp.RealCareKeeperProvider.__new__(cp.RealCareKeeperProvider)
     p.device_mac = "aa:bb:cc:dd:ee:ff"
     p.bp_port = "/dev/fake-port"
     p.on_retry_attempt = None
     p.on_retry_giveup = None
+    # measure_blood_pressure now auto-detects the port; keep the configured fake
+    # port "present" so the connect-retry tests below exercise only that path.
+    monkeypatch.setattr(
+        "serial.tools.list_ports.comports", lambda: [_fake_port("/dev/fake-port")]
+    )
     return p
 
 
@@ -62,3 +74,50 @@ def test_bp_measure_timeout_is_not_retried(provider, monkeypatch):
 
     assert factory.calls == 1
     assert SubsystemRegistry.get("bp_monitor").disabled is False
+
+
+def test_resolve_bp_port_honors_configured_when_present(provider, monkeypatch):
+    provider.bp_port = "/dev/ttyUSB0"
+    monkeypatch.setattr(
+        "serial.tools.list_ports.comports", lambda: [_fake_port("/dev/ttyUSB0")]
+    )
+    assert provider._resolve_bp_port() == "/dev/ttyUSB0"
+
+
+def test_resolve_bp_port_auto_detects_when_configured_is_stale(provider, monkeypatch):
+    provider.bp_port = "/dev/ttyUSB0"  # set in .env but the number has shifted
+    monkeypatch.setattr(
+        "serial.tools.list_ports.comports", lambda: [_fake_port("/dev/ttyUSB1")]
+    )
+    assert provider._resolve_bp_port() == "/dev/ttyUSB1"
+
+
+def test_resolve_bp_port_prefers_esp32_bridge_when_several_usb_serial(provider, monkeypatch):
+    provider.bp_port = ""
+    monkeypatch.setattr(
+        "serial.tools.list_ports.comports",
+        lambda: [
+            _fake_port("/dev/ttyUSB0", vid=0x2341),  # some other USB serial
+            _fake_port("/dev/ttyUSB1", vid=0x10C4),  # CP210x ESP32 bridge -> pick
+        ],
+    )
+    assert provider._resolve_bp_port() == "/dev/ttyUSB1"
+
+
+def test_resolve_bp_port_falls_back_to_sole_usb_serial(provider, monkeypatch):
+    provider.bp_port = ""
+    monkeypatch.setattr(
+        "serial.tools.list_ports.comports",
+        lambda: [_fake_port("/dev/ttyUSB0", vid=0x9999)],  # unknown chip, sole USB
+    )
+    assert provider._resolve_bp_port() == "/dev/ttyUSB0"
+
+
+def test_resolve_bp_port_raises_when_no_usb_serial_present(provider, monkeypatch):
+    provider.bp_port = ""
+    monkeypatch.setattr(
+        "serial.tools.list_ports.comports",
+        lambda: [_fake_port("/dev/ttyS0", vid=None)],  # built-in UART, not USB
+    )
+    with pytest.raises(RuntimeError):
+        provider._resolve_bp_port()

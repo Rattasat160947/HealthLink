@@ -1103,45 +1103,36 @@ class CareKeeperWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
+        bt = BluetoothIndicator()
+        wifi = WifiIndicator()
         battery = BatteryIndicator()
         battery_text = QLabel("0%")
         battery_text.setObjectName("ConsoleBatteryLabel")
+        bt_text = QLabel("OFF")
+        bt_text.setObjectName("StatusText")
+        wifi_text = QLabel("OFF")
+        wifi_text.setObjectName("StatusText")
 
-        # Bluetooth/Wi-Fi live only on the welcome screen. On the measure and
-        # summary headers they are dropped so the wide status cluster stops
-        # squeezing the patient name/ID; only battery stays there.
-        bt = wifi = bt_text = wifi_text = None
-        if welcome:
-            bt = BluetoothIndicator()
-            wifi = WifiIndicator()
-            bt_text = QLabel("OFF")
-            bt_text.setObjectName("StatusText")
-            wifi_text = QLabel("OFF")
-            wifi_text.setObjectName("StatusText")
+        wifi.clicked.connect(self._open_wifi_selector)
+        bt.clicked.connect(self._open_bluetooth_selector)
 
-            wifi.clicked.connect(self._open_wifi_selector)
-            bt.clicked.connect(self._open_bluetooth_selector)
+        bt_card = QFrame()
+        bt_card.setObjectName("StatusPill")
+        bt_card.setFixedSize(116, 42)
+        bt_layout = QHBoxLayout(bt_card)
+        bt_layout.setContentsMargins(8, 4, 10, 4)
+        bt_layout.setSpacing(4)
+        bt_layout.addWidget(bt, alignment=Qt.AlignCenter)
+        bt_layout.addWidget(bt_text, alignment=Qt.AlignCenter)
 
-            bt_card = QFrame()
-            bt_card.setObjectName("StatusPill")
-            bt_card.setFixedSize(116, 42)
-            bt_layout = QHBoxLayout(bt_card)
-            bt_layout.setContentsMargins(8, 4, 10, 4)
-            bt_layout.setSpacing(4)
-            bt_layout.addWidget(bt, alignment=Qt.AlignCenter)
-            bt_layout.addWidget(bt_text, alignment=Qt.AlignCenter)
-
-            wifi_card = QFrame()
-            wifi_card.setObjectName("StatusPill")
-            wifi_card.setFixedSize(92, 42)
-            wifi_layout = QHBoxLayout(wifi_card)
-            wifi_layout.setContentsMargins(8, 4, 10, 4)
-            wifi_layout.setSpacing(4)
-            wifi_layout.addWidget(wifi, alignment=Qt.AlignCenter)
-            wifi_layout.addWidget(wifi_text, alignment=Qt.AlignCenter)
-
-            layout.addWidget(bt_card)
-            layout.addWidget(wifi_card)
+        wifi_card = QFrame()
+        wifi_card.setObjectName("StatusPill")
+        wifi_card.setFixedSize(92, 42)
+        wifi_layout = QHBoxLayout(wifi_card)
+        wifi_layout.setContentsMargins(8, 4, 10, 4)
+        wifi_layout.setSpacing(4)
+        wifi_layout.addWidget(wifi, alignment=Qt.AlignCenter)
+        wifi_layout.addWidget(wifi_text, alignment=Qt.AlignCenter)
 
         battery_card = QFrame()
         battery_card.setObjectName("BatteryPill")
@@ -1151,6 +1142,9 @@ class CareKeeperWindow(QMainWindow):
         battery_layout.setSpacing(6)
         battery_layout.addWidget(battery, alignment=Qt.AlignCenter)
         battery_layout.addWidget(battery_text, alignment=Qt.AlignCenter)
+
+        layout.addWidget(bt_card)
+        layout.addWidget(wifi_card)
         layout.addWidget(battery_card)
 
         if not hasattr(self, "_status_widgets"):
@@ -1163,6 +1157,8 @@ class CareKeeperWindow(QMainWindow):
             self.bat_ind_welcome = battery
             self.lbl_bat_welcome = battery_text
         else:
+            self.bluetooth_indicator = bt
+            self.wifi_indicator = wifi
             self.battery_indicator = battery
             self.lbl_battery_text = battery_text
 
@@ -1268,9 +1264,10 @@ class CareKeeperWindow(QMainWindow):
         self.stack.setCurrentIndex(1)
 
     def _refresh_patient(self) -> None:
+        # Thai name only. The status cluster (Bluetooth/Wi-Fi/battery) is back on
+        # the measure and summary headers, so the English name is dropped to keep
+        # row 1 from overrunning the cluster on the 1024px screen.
         display_name = self.patient.th_name
-        if self.patient.en_name and self.patient.en_name != "-":
-            display_name = f"{self.patient.th_name} ({self.patient.en_name})"
         display_address = self._short_address(self.patient.address)
 
         for name, cid, dob, address in (
