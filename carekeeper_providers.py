@@ -368,39 +368,59 @@ class RealCareKeeperProvider(CareKeeperProvider):
             "ไม่พบพอร์ตเครื่องวัดความดัน (ไม่มีอุปกรณ์ USB serial เสียบอยู่)"
         )
 
+    # Seconds to keep polling the MAX30102 for a valid reading once the sensor
+    # is open (the operator needs a moment to place a finger). Class attribute
+    # so tests can shrink it.
+    _SPO2_READ_TIMEOUT = 30.0
+
     def measure_spo2(self) -> int:
-        return asyncio.run(self._measure_spo2_async())
-
-    async def _measure_spo2_async(self) -> int:
-        from lib.h59_ble import H59Device, SpO2Reader
-
-        device = H59Device(
-            device_name=self.h59_device_name,
-            device_address=self.h59_device_address,
+        # SpO2 now comes from a MAX30102 (I2C), replacing the old H59 Bluetooth
+        # oximeter. Only OPENING the sensor is retried/disabled (a real hardware
+        # fault); the read then just polls until a valid finger reading appears,
+        # so a finger-not-placed timeout doesn't disable the subsystem. Mirrors
+        # the BP monitor's connect-vs-measure split.
+        monitor = retry_with_notify(
+            self._open_spo2_sensor,
+            subsystem="spo2",
+            on_attempt=lambda a, m: self._notify_attempt("spo2", a, m),
+            on_give_up=lambda r: self._notify_giveup("spo2", r),
         )
-        reader = SpO2Reader(device, timeout=60)
-
         try:
-            # max_retries=1 here means each outer attempt makes exactly one
-            # connect try; retry_with_notify_async is the sole source of the
-            # 3-attempts-then-disable count, so the two retry layers don't compound.
-            await retry_with_notify_async(
-                lambda: device.connect(max_retries=1),
-                subsystem="spo2",
-                on_attempt=lambda a, m: self._notify_attempt("spo2", a, m),
-                on_give_up=lambda r: self._notify_giveup("spo2", r),
-            )
-            value = await reader.read()
-            if value is None:
-                raise RuntimeError("ไม่สามารถอ่านค่า SpO2 ได้")
-            return int(value)
+            return self._read_spo2(monitor)
         finally:
-            reader.close()
-            if device.is_connected:
-                await device.disconnect()
+            try:
+                monitor.m.shutdown()
+            except Exception:
+                pass
+
+    def _open_spo2_sensor(self):
+        from lib.spo2_max30102 import SpO2Monitor
+
+        return SpO2Monitor()
+
+    def _read_spo2(self, monitor) -> int:
+        deadline = time.monotonic() + self._SPO2_READ_TIMEOUT
+        while time.monotonic() < deadline:
+            _hr, spo2, _red, _ir = monitor.GetSpO2Sensor()
+            # 0 = algorithm couldn't compute; clamp to a physiological window so
+            # the display never shows garbage from a poor/edge signal.
+            if 70 <= spo2 <= 100:
+                return int(spo2)
+        raise RuntimeError("อ่านค่า SpO2 ไม่สำเร็จ (วางนิ้วให้แนบเซนเซอร์แล้วอยู่นิ่งๆ)")
 
     def measure_temperature(self) -> float:
-        raise NotImplementedError("ยังไม่ได้เชื่อมต่อโมดูลวัดอุณหภูมิจริง")
+        # Contact body-temp probe (DS18B20, 1-Wire) from the E-Medhealth library.
+        from lib.temp_sensor import temp_sensor
+
+        try:
+            sensor = temp_sensor()
+        except Exception as e:
+            raise RuntimeError(f"ไม่พบเซนเซอร์อุณหภูมิ (DS18B20): {e}")
+
+        result = sensor.measure_body_temperature()
+        if result is None:
+            raise RuntimeError("วัดอุณหภูมิไม่สำเร็จ (แนบเซนเซอร์กับผิวแล้วรอให้ค่านิ่ง)")
+        return float(result)
 
     def get_device_status(self) -> DeviceStatus:
         return DeviceStatus(

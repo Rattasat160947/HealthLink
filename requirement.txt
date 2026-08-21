@@ -5,3 +5,5 @@ pyserial
 pyscard
 requests
 python-dotenv
+numpy
+smbus2
