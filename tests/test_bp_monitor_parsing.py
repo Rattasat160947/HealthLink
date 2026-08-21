@@ -57,6 +57,18 @@ def test_handle_line_result_stores_last_result_and_fires_callback():
     assert received == [BPResult(sys=135, dia=88, pul=70)]
 
 
+def test_handle_line_result_unblocks_measure_without_waiting_for_ready():
+    """The SYS reading is already valid, so it must unblock measure() on its own
+    -- not wait for the later READY line. This removes the firmware's SYS->READY
+    delay from what the operator sees on screen."""
+    monitor = _monitor()
+    monitor._done_event.clear()
+
+    monitor._handle_line("SYS:120,DIA:80,PUL:70")
+
+    assert monitor._done_event.is_set()
+
+
 def test_handle_line_malformed_result_keeps_last_result_none():
     monitor = _monitor()
     monitor._handle_line("SYS:bad,DIA:88,PUL:70")

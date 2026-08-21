@@ -148,6 +148,10 @@ class BPMonitor:
                 print(f"{'='*40}\n")
                 if self.on_result:
                     self.on_result(result)
+                # The reading is already valid here; unblock measure() now
+                # instead of waiting for the later "READY" line, so the value
+                # reaches the screen without the firmware's SYS->READY delay.
+                self._done_event.set()
 
         # ── Error: "BP_ERROR" ──
         elif line == "BP_ERROR":
