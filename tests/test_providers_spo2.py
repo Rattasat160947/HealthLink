@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -19,14 +21,22 @@ def provider():
 
 
 class _FakeMonitor:
-    """Stand-in for lib.spo2_max30102.SpO2Monitor."""
+    """Stand-in for lib.spo2_max30102.SpO2Monitor.
+
+    measure_spo2() is the settled reading (None = never stabilized); the
+    settling itself is covered by tests/test_spo2_stability.py."""
 
     def __init__(self, spo2=97):
         self._spo2 = spo2
         self.m = SimpleNamespace(shutdown=lambda: None)
+        self.calls = 0
+
+    def measure_spo2(self, on_progress=None):
+        self.calls += 1
+        return self._spo2
 
     def GetSpO2Sensor(self):
-        return (72, self._spo2, [], [])
+        return (72, self._spo2 or 0, [], [])
 
 
 class _FailingOpen:
@@ -71,12 +81,11 @@ def test_spo2_open_exhausts_and_disables(provider, monkeypatch):
 
 
 def test_spo2_read_timeout_raises_without_disabling(provider, monkeypatch):
-    """Sensor opens fine but never yields a valid finger reading (all 0). The
-    read loop times out and raises, but the open path is not retried and the
-    subsystem stays enabled -- a finger-not-placed timeout is not a fault."""
-    opener = _FailingOpen(fail_times=0, monitor=_FakeMonitor(spo2=0))
+    """Sensor opens fine but the reading never settles (measure_spo2 -> None).
+    The read raises, but the open path is not retried and the subsystem stays
+    enabled -- a finger-not-placed timeout is not a hardware fault."""
+    opener = _FailingOpen(fail_times=0, monitor=_FakeMonitor(spo2=None))
     monkeypatch.setattr(provider, "_open_spo2_sensor", opener)
-    provider._SPO2_READ_TIMEOUT = 0.2  # don't actually wait the full 30s
 
     with pytest.raises(RuntimeError):
         provider.measure_spo2()
@@ -85,16 +94,37 @@ def test_spo2_read_timeout_raises_without_disabling(provider, monkeypatch):
     assert SubsystemRegistry.get("spo2").disabled is False
 
 
-def test_spo2_skips_out_of_range_then_accepts_valid(provider, monkeypatch):
-    """A flagged-but-unphysiological value (40) is skipped; polling continues
-    until a value inside the 70-100 window appears."""
-    monitor = _FakeMonitor()
-    seq = iter([(72, 40, [], []), (72, 40, [], []), (72, 98, [], [])])
-    monitor.GetSpO2Sensor = lambda: next(seq)
+def test_spo2_returns_the_settled_value(provider, monkeypatch):
+    """The provider hands back whatever the monitor settled on -- it no longer
+    does its own polling, so the GUI gets a final value, not a first sample."""
+    monitor = _FakeMonitor(spo2=98)
     monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
 
     assert provider.measure_spo2() == 98
+    assert monitor.calls == 1
     assert SubsystemRegistry.get("spo2").disabled is False
+
+
+def test_spo2_open_passes_read_timeout_to_monitor(provider, monkeypatch):
+    """_SPO2_READ_TIMEOUT is the single knob for how long a measurement may
+    take; it has to reach the monitor, which owns the settling loop now."""
+    created = {}
+
+    class _Monitor:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+            self.m = SimpleNamespace(shutdown=lambda: None)
+
+        def measure_spo2(self, on_progress=None):
+            return 96
+
+    fake_pkg = types.ModuleType("lib.spo2_max30102")
+    fake_pkg.SpO2Monitor = _Monitor
+    monkeypatch.setitem(sys.modules, "lib.spo2_max30102", fake_pkg)
+    provider._SPO2_READ_TIMEOUT = 12.0
+
+    assert provider.measure_spo2() == 96
+    assert created == {"max_wait_seconds": 12.0}
 
 
 # ---- temperature (DS18B20) ----

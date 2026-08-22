@@ -368,17 +368,18 @@ class RealCareKeeperProvider(CareKeeperProvider):
             "ไม่พบพอร์ตเครื่องวัดความดัน (ไม่มีอุปกรณ์ USB serial เสียบอยู่)"
         )
 
-    # Seconds to keep polling the MAX30102 for a valid reading once the sensor
-    # is open (the operator needs a moment to place a finger). Class attribute
-    # so tests can shrink it.
+    # Seconds to keep polling the MAX30102 for a settled reading once the
+    # sensor is open (the operator needs a moment to place a finger, and the
+    # value then needs ~9 s to settle: 4 s to fill the algorithm's window plus
+    # 1 s per stability sample). Class attribute so tests can shrink it.
     _SPO2_READ_TIMEOUT = 30.0
 
     def measure_spo2(self) -> int:
         # SpO2 now comes from a MAX30102 (I2C), replacing the old H59 Bluetooth
         # oximeter. Only OPENING the sensor is retried/disabled (a real hardware
-        # fault); the read then just polls until a valid finger reading appears,
-        # so a finger-not-placed timeout doesn't disable the subsystem. Mirrors
-        # the BP monitor's connect-vs-measure split.
+        # fault); the read then polls until the reading settles, so a
+        # finger-not-placed timeout doesn't disable the subsystem. Mirrors the
+        # BP monitor's connect-vs-measure split.
         monitor = retry_with_notify(
             self._open_spo2_sensor,
             subsystem="spo2",
@@ -396,17 +397,20 @@ class RealCareKeeperProvider(CareKeeperProvider):
     def _open_spo2_sensor(self):
         from lib.spo2_max30102 import SpO2Monitor
 
-        return SpO2Monitor()
+        return SpO2Monitor(max_wait_seconds=self._SPO2_READ_TIMEOUT)
 
     def _read_spo2(self, monitor) -> int:
-        deadline = time.monotonic() + self._SPO2_READ_TIMEOUT
-        while time.monotonic() < deadline:
-            _hr, spo2, _red, _ir = monitor.GetSpO2Sensor()
-            # 0 = algorithm couldn't compute; clamp to a physiological window so
-            # the display never shows garbage from a poor/edge signal.
-            if 70 <= spo2 <= 100:
-                return int(spo2)
-        raise RuntimeError("อ่านค่า SpO2 ไม่สำเร็จ (วางนิ้วให้แนบเซนเซอร์แล้วอยู่นิ่งๆ)")
+        # The monitor settles the value itself -- it keeps sliding its sample
+        # window until several consecutive estimates agree, then returns the
+        # median of that window -- exactly like the DS18B20 probe settles body
+        # temperature. So what reaches the GUI is a final reading, not the
+        # first in-range sample that happened to come out of the algorithm.
+        # Values outside 70-100% and finger-off windows are rejected inside
+        # measure_spo2(), which returns None if nothing ever settles.
+        result = monitor.measure_spo2()
+        if result is None:
+            raise RuntimeError("อ่านค่า SpO2 ไม่สำเร็จ (วางนิ้วให้แนบเซนเซอร์แล้วอยู่นิ่งๆ)")
+        return int(result)
 
     def measure_temperature(self) -> float:
         # Contact body-temp probe (DS18B20, 1-Wire) from the E-Medhealth library.

@@ -1,0 +1,261 @@
+# -*- coding: utf-8 -*-
+"""Unit tests for the SpO2 settling loop (lib/spo2_max30102/spo2_monitor.py).
+
+The module imports `smbus` (Raspberry Pi I2C) through max30102.py at import
+time, so a fake smbus module is injected before importing it, and the monitor
+is built with an injected fake sensor -- no I2C, no MAX30102, no waiting.
+`calc_hr_and_spo2` is replaced with a scripted sequence so each test controls
+exactly which SpO2 values the algorithm "produces"; what is under test is the
+settling logic on top of it, not the DSP.
+"""
+from __future__ import annotations
+
+import importlib
+import sys
+import types
+
+import pytest
+
+
+_MODULES = (
+    "lib.spo2_max30102",
+    "lib.spo2_max30102.spo2_monitor",
+    "lib.spo2_max30102.max30102",
+)
+
+
+@pytest.fixture
+def spo2_module(monkeypatch):
+    fake_smbus = types.ModuleType("smbus")
+    fake_smbus.SMBus = object
+    monkeypatch.setitem(sys.modules, "smbus", fake_smbus)
+    for name in _MODULES:
+        sys.modules.pop(name, None)
+    module = importlib.import_module("lib.spo2_max30102.spo2_monitor")
+    yield module
+    for name in _MODULES:
+        sys.modules.pop(name, None)
+
+
+class FakeSensor:
+    """Stand-in for MAX30102.
+
+    Returns flat sample blocks whose IR level is scripted per read (that DC
+    level is what the finger check looks at) and records how many samples each
+    read asked for, so the sliding window can be asserted."""
+
+    def __init__(self, ir_levels=(80000,)):
+        self.ir_levels = list(ir_levels)
+        self.requested: list[int] = []
+
+    def read_sequential(self, amount=110):
+        level = self.ir_levels[min(len(self.requested), len(self.ir_levels) - 1)]
+        self.requested.append(amount)
+        return [level // 2] * amount, [level] * amount
+
+
+def script_calc(monkeypatch, module, values, bpm=72):
+    """Make calc_hr_and_spo2 return `values` in order (last value repeats).
+
+    None means "the algorithm could not compute this window" (invalid flags),
+    which is what a motion artifact or weak perfusion looks like."""
+    calls = {"n": 0, "lengths": []}
+
+    def fake_calc(ir_data, red_data):
+        sp = values[min(calls["n"], len(values) - 1)]
+        calls["n"] += 1
+        calls["lengths"].append(len(ir_data))
+        if sp is None:
+            return -999, False, -999, False
+        return bpm, True, float(sp), True
+
+    monkeypatch.setattr(module, "calc_hr_and_spo2", fake_calc)
+    return calls
+
+
+def quiet(spo2, **kwargs):
+    """on_progress=None means "print" (the library default), so tests that do
+    not inspect progress pass this instead of leaving the loop printing."""
+
+
+def build(module, sensor, **kwargs):
+    kwargs.setdefault("max_wait_seconds", 5)
+    return module.SpO2Monitor(sensor=sensor, **kwargs)
+
+
+def test_returns_median_of_a_settled_window(spo2_module, monkeypatch):
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [97, 98, 97, 98, 97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+
+
+def test_window_fills_once_then_slides_one_second_at_a_time(spo2_module, monkeypatch):
+    """A fresh 100-sample read per estimate would cost ~4 s each (~20 s for a
+    measurement); the window is filled once and then advanced 25 samples (1 s)
+    per estimate, which is also why five readings span more than 100 samples
+    and are therefore independent of each other."""
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    monitor.measure_spo2(on_progress=quiet)
+
+    assert sensor.requested == [100, 25, 25, 25, 25]
+    assert monitor.stability_window * spo2_module.SpO2Monitor.STEP_SAMPLES >= 100
+
+
+def test_keeps_measuring_until_the_values_agree(spo2_module, monkeypatch):
+    """The old code returned the first in-range sample (90 here). Now the
+    jittery run has to settle first, so the result is the settled 97."""
+    sensor = FakeSensor()
+    calls = script_calc(monkeypatch, spo2_module, [90, 99, 95, 97, 97, 97, 97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert calls["n"] == 7  # not 1: it did not stop at the first valid value
+
+
+def test_out_of_range_and_uncomputable_windows_are_skipped(spo2_module, monkeypatch):
+    """40% / 101% are unphysiological and None is a window the algorithm could
+    not compute; none of them may enter the stability window (if any did, the
+    spread would keep the run from ever settling on 97)."""
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [40, 101, None, 97, 97, 97, 97, 97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+
+
+def test_no_finger_never_settles(spo2_module, monkeypatch):
+    """IR DC level far below the threshold = nothing on the sensor. It times
+    out instead of reporting a value, and every progress callback says so."""
+    sensor = FakeSensor(ir_levels=(1200,))
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor, max_wait_seconds=0.15)
+
+    seen = []
+    result = monitor.measure_spo2(
+        on_progress=lambda spo2, **kw: seen.append((spo2, kw["finger_detected"]))
+    )
+
+    assert result is None
+    assert seen and all(value is None and not finger for value, finger in seen)
+
+
+def test_lifting_the_finger_restarts_the_measurement(spo2_module, monkeypatch):
+    """Four good windows, then the finger comes off for one read, then a run at
+    a different level. Progress must be dropped on the lift, so the result is
+    the post-lift value (95), never a mix of before and after (97)."""
+    sensor = FakeSensor(ir_levels=(80000, 80000, 80000, 80000, 1200, 80000))
+    script_calc(monkeypatch, spo2_module, [97, 97, 97, 97, 95, 95, 95, 95, 95])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 95
+    # the window was refilled from scratch after the lift, not slid on top of
+    # samples that straddle the gap
+    assert sensor.requested.count(100) == 2
+
+
+def test_settled_measurement_exposes_the_matching_pulse(spo2_module, monkeypatch):
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [97, 98, 97, 98, 97], bpm=74)
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert monitor.spo2 == 97
+    assert monitor.bpm == 74
+
+
+def test_progress_reports_each_reading_then_the_stable_one(spo2_module, monkeypatch):
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [96, 97, 96, 97, 96])
+    monitor = build(spo2_module, sensor)
+
+    seen = []
+    monitor.measure_spo2(on_progress=lambda spo2, **kw: seen.append((spo2, kw["stable"])))
+
+    assert seen == [(96, False), (97, False), (96, False), (97, False), (96, True)]
+
+
+def test_get_spo2_sensor_still_returns_an_instantaneous_reading(spo2_module, monkeypatch):
+    """The raw one-shot API is unchanged -- lib/spo2_max30102/spo2_monitor.py
+    --raw and any debugging code keep working."""
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [95], bpm=80)
+    monitor = build(spo2_module, sensor)
+
+    bpm, spo2, red, ir = monitor.GetSpO2Sensor()
+
+    assert (bpm, spo2) == (80, 95)
+    assert len(red) == len(ir) == 110
+
+
+def test_a_partly_filled_window_is_never_measured(spo2_module, monkeypatch):
+    """calc_hr_and_spo2() indexes a fixed 100-sample window, so handing it a
+    short one would read past the end of the array. A FIFO that returns fewer
+    samples than asked must therefore only delay the first estimate -- the
+    algorithm still only ever sees a full window."""
+
+    class ShortSensor(FakeSensor):
+        """Returns 40 samples per read however many were asked for."""
+
+        def read_sequential(self, amount=110):
+            red, ir = super().read_sequential(amount)
+            return red[:40], ir[:40]
+
+    sensor = ShortSensor()
+    calls = script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert calls["lengths"] and all(n == 100 for n in calls["lengths"])
+    # 40 + 40 + 40 -> the first two reads are too short to measure on
+    assert len(sensor.requested) == calls["n"] + 2
+
+
+def test_over_long_reads_do_not_grow_the_window(spo2_module, monkeypatch):
+    """read_sequential() drains whatever the FIFO holds, so it can hand back a
+    few more samples than requested; the extra must be trimmed away."""
+
+    class GreedySensor(FakeSensor):
+        def read_sequential(self, amount=110):
+            return super().read_sequential(amount + 7)
+
+    calls = script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, GreedySensor())
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert all(n == 100 for n in calls["lengths"])
+
+
+def test_no_samples_means_no_finger(spo2_module):
+    monitor = build(spo2_module, FakeSensor())
+    assert monitor.is_finger_present([]) is False
+
+
+def test_default_progress_prints_each_state(spo2_module, capsys):
+    """Running the module by hand on the Pi is the field-debugging path, so the
+    printed states have to distinguish contact / weak signal / settled."""
+    progress = spo2_module.SpO2Monitor.default_progress
+
+    progress(None, bpm=0, stable=False, finger_detected=False)
+    progress(None, bpm=70, stable=False, finger_detected=True)
+    progress(97, bpm=70, stable=False, finger_detected=True)
+    progress(97, bpm=70, stable=True, finger_detected=True)
+    lines = capsys.readouterr().out.splitlines()
+
+    assert "Place a finger" in lines[0]
+    assert "weak signal" in lines[1]
+    assert "measuring..." in lines[2]
+    assert "SpO2 97%" in lines[3] and "stable" in lines[3]
+
+
+def test_progress_defaults_to_printing(spo2_module, monkeypatch, capsys):
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2() == 97
+    assert "stable" in capsys.readouterr().out
