@@ -26,10 +26,16 @@ class _FakeMonitor:
     measure_spo2() is the settled reading (None = never stabilized); the
     settling itself is covered by tests/test_spo2_stability.py."""
 
-    def __init__(self, spo2=97):
+    def __init__(self, spo2=97, last_error=None, last_ir_dc=0, overflows=0):
         self._spo2 = spo2
         self.m = SimpleNamespace(shutdown=lambda: None)
         self.calls = 0
+        # Set by the real monitor when it gives up, so the provider can say
+        # which of the three ways it failed.
+        self.last_error = last_error
+        self.last_ir_dc = last_ir_dc
+        self.overflows = overflows
+        self.finger_ir_threshold = 10000
 
     def measure_spo2(self, on_progress=None):
         self.calls += 1
@@ -125,6 +131,69 @@ def test_spo2_open_passes_read_timeout_to_monitor(provider, monkeypatch):
 
     assert provider.measure_spo2() == 96
     assert created == {"max_wait_seconds": 12.0}
+
+
+# ---- why a SpO2 read failed ----
+
+
+def test_no_finger_failure_names_the_placement_and_shows_the_ir_level(provider, monkeypatch):
+    """A finger that reads as absent is how a mis-tuned FINGER_IR_THRESHOLD
+    presents, so the level and the cutoff both go in the message -- that pair
+    is what CAREKEEPER_SPO2_FINGER_IR_THRESHOLD gets set against."""
+    monitor = _FakeMonitor(spo2=None, last_error="NO_FINGER", last_ir_dc=7400)
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    message = str(excinfo.value)
+    assert "ไม่พบนิ้ว" in message
+    assert "IR=7400/10000" in message
+
+
+def test_unstable_failure_asks_the_operator_to_hold_still(provider, monkeypatch):
+    """The opposite instruction from the no-finger case: contact was fine."""
+    monitor = _FakeMonitor(spo2=None, last_error="UNSTABLE")
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    message = str(excinfo.value)
+    assert "ยังไม่นิ่ง" in message
+    assert "IR=" not in message  # the IR level explains nothing here
+
+
+def test_weak_signal_failure_is_its_own_message(provider, monkeypatch):
+    monitor = _FakeMonitor(spo2=None, last_error="WEAK_SIGNAL")
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    assert "อ่อนเกินไป" in str(excinfo.value)
+
+
+def test_discarded_fifo_gaps_are_reported(provider, monkeypatch):
+    """Dropped samples mean the Pi could not keep up with the sensor, which is
+    a different problem from anything the operator can fix by holding still."""
+    monitor = _FakeMonitor(spo2=None, last_error="UNSTABLE", overflows=3)
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    assert "3 ครั้ง" in str(excinfo.value)
+
+
+def test_unknown_failure_reason_falls_back_to_the_generic_message(provider, monkeypatch):
+    monitor = _FakeMonitor(spo2=None, last_error=None)
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    assert "อ่านค่า SpO2 ไม่สำเร็จ" in str(excinfo.value)
 
 
 # ---- temperature (DS18B20) ----

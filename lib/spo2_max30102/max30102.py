@@ -70,14 +70,26 @@ class MAX30102():
         """
         self.bus.write_i2c_block_data(self.address, REG_MODE_CONFIG, [0x40])
 
-    def setup(self, led_mode=0x03):
+    # LED drive current, in units of 0.2 mA (0x3F = 12.6 mA). The Maxim sample
+    # code uses 0x24 (~7 mA), which on these breakout boards leaves the IR DC
+    # level -- and with it the pulsatile AC amplitude the algorithm has to find
+    # peaks in -- low enough that a real finger can read as "no finger". Raising
+    # it costs nothing but LED power and lifts both.
+    DEFAULT_LED_CURRENT = 0x3F
+
+    def setup(self, led_mode=0x03, led_current=None):
         """
         This will setup the device with the values written in sample Arduino code.
         """
+        if led_current is None:
+            led_current = self.DEFAULT_LED_CURRENT
+
         # INTR setting
-        # 0xc0 : A_FULL_EN and PPG_RDY_EN = Interrupt will be triggered when
-        # fifo almost full & new fifo data ready
-        self.bus.write_i2c_block_data(self.address, REG_INTR_ENABLE_1, [0xc0])
+        # Interrupts drive the INT pin only, and nothing here is wired to it --
+        # this driver polls the FIFO pointers instead. Leaving them disabled is
+        # what makes it safe for read_fifo() to skip clearing the status
+        # registers, which is 2 of every 3 I2C transactions it used to spend.
+        self.bus.write_i2c_block_data(self.address, REG_INTR_ENABLE_1, [0x00])
         self.bus.write_i2c_block_data(self.address, REG_INTR_ENABLE_2, [0x00])
 
         # FIFO_WR_PTR[4:0]
@@ -89,6 +101,11 @@ class MAX30102():
 
         # 0b 0100 1111
         # sample avg = 4, fifo rollover = false, fifo almost full = 17
+        # Rollover stays OFF on purpose: with it on, a wrapped FIFO leaves the
+        # read and write pointers equal, which is indistinguishable from an
+        # empty one, so get_data_present() would report "no data" while holding
+        # 32 stale samples. Off, an overflow is detectable instead --
+        # see get_overflow_count().
         self.bus.write_i2c_block_data(self.address, REG_FIFO_CONFIG, [0x4f])
 
         # 0x02 for read-only, 0x03 for SpO2 mode, 0x07 multimode LED
@@ -97,10 +114,9 @@ class MAX30102():
         # SPO2_ADC range = 4096nA, SPO2 sample rate = 100Hz, LED pulse-width = 411uS
         self.bus.write_i2c_block_data(self.address, REG_SPO2_CONFIG, [0x27])
 
-        # choose value for ~7mA for LED1
-        self.bus.write_i2c_block_data(self.address, REG_LED1_PA, [0x24])
-        # choose value for ~7mA for LED2
-        self.bus.write_i2c_block_data(self.address, REG_LED2_PA, [0x24])
+        # LED1 (red) and LED2 (IR) drive current
+        self.bus.write_i2c_block_data(self.address, REG_LED1_PA, [led_current])
+        self.bus.write_i2c_block_data(self.address, REG_LED2_PA, [led_current])
         # choose value fro ~25mA for Pilot LED
         self.bus.write_i2c_block_data(self.address, REG_PILOT_PA, [0x7f])
 
@@ -121,6 +137,20 @@ class MAX30102():
                 num_samples += 32
             return num_samples
 
+    def get_overflow_count(self):
+        """Samples the FIFO dropped because it filled up before being read.
+
+        FIFO rollover is off (see FIFO_CONFIG in setup), so a full FIFO stops
+        accepting samples until it is drained: the buffer stays internally
+        contiguous but a gap opens in TIME, which is invisible in the data and
+        quietly corrupts both the peak-to-peak interval (heart rate) and the
+        AC/DC ratio (SpO2). Callers use this to throw such a window away rather
+        than compute a plausible-looking wrong answer from it."""
+        return self.bus.read_byte_data(self.address, REG_OVF_COUNTER) & 0x1F
+
+    def clear_overflow_count(self):
+        self.bus.write_i2c_block_data(self.address, REG_OVF_COUNTER, [0x00])
+
     def read_fifo(self):
         """
         This function will read the data register.
@@ -128,9 +158,12 @@ class MAX30102():
         red_led = None
         ir_led = None
 
-        # read 1 byte from registers (values are discarded)
-        reg_INTR1 = self.bus.read_i2c_block_data(self.address, REG_INTR_STATUS_1, 1)
-        reg_INTR2 = self.bus.read_i2c_block_data(self.address, REG_INTR_STATUS_2, 1)
+        # The interrupt status registers used to be read (and discarded) on
+        # every single sample. Interrupts are disabled in setup() and the INT
+        # pin is unused, so nothing needs clearing -- dropping those two reads
+        # cuts this function from 3 I2C transactions per sample to 1, which is
+        # what keeps the FIFO drained fast enough to avoid the overflow gap
+        # that get_overflow_count() exists to catch.
 
         # read 6-byte data from the device
         d = self.bus.read_i2c_block_data(self.address, REG_FIFO_DATA, 6)

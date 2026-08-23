@@ -430,6 +430,18 @@ _SUBSYSTEM_LABELS = {
 
 
 class CareKeeperWindow(QMainWindow):
+    # How long the NIBP button stays locked after a measurement. A good reading
+    # only needs the cuff to deflate and the arm to recover; a device-reported
+    # BP_ERROR also parks the cuff in a lockout of its own.
+    #
+    # The error cooldown is deliberately SHORTER than that lockout (the
+    # firmware asks for ~2 min). Holding the operator for the full two minutes
+    # costs more than an early retry does: a retry that lands too soon now
+    # comes straight back as NOT_READY with its own message in well under a
+    # second, instead of hanging, so letting them try again at 60 s is cheap.
+    BP_COOLDOWN_AFTER_SUCCESS = 60
+    BP_COOLDOWN_AFTER_DEVICE_ERROR = 60
+
     def __init__(self, provider: CareKeeperProvider, mode_name: str = "Mock") -> None:
         super().__init__()
         self.provider = provider
@@ -440,6 +452,7 @@ class CareKeeperWindow(QMainWindow):
         self.status_task: ProviderTask | None = None
         self.network_task: ProviderTask | None = None
         self.bp_cooldown_seconds = 0
+        self.bp_cooldown_succeeded = True
         self.status_fail_count = 0
         self.last_status_warning_ts = 0.0
         self.last_queue_warning_ts = 0.0
@@ -1978,15 +1991,25 @@ class CareKeeperWindow(QMainWindow):
             self.vitals.systolic = result.systolic
             self.vitals.diastolic = result.diastolic
             self.vitals.pulse = result.pulse
-        self.bp_cooldown_seconds = 60
-        self.cooldown_timer.start(1000)
-        self._set_measure_button(self.btn_bp, "BtnNIBPBusy", f"รอ\n{self.bp_cooldown_seconds} วินาที", False)
+        self._start_bp_cooldown(self.BP_COOLDOWN_AFTER_SUCCESS, succeeded=True)
         self._set_system_message("วัดความดันโลหิตสำเร็จ", success=True)
         self._refresh_values()
 
     def _on_bp_failed(self, message: str) -> None:
         self._set_measure_button(self.btn_bp, "BtnNIBPFail", "วัดไม่สำเร็จ\nความดัน", True)
         self._set_system_message(f"วัดความดันไม่สำเร็จ: {message}", success=False)
+        # A BP_ERROR parks the cuff in a lockout of its own, so give it a
+        # moment rather than letting the operator hammer the button into a
+        # device that is not listening. See BP_COOLDOWN_AFTER_DEVICE_ERROR for
+        # why that pause is shorter than the lockout itself.
+        if getattr(self.provider, "last_bp_error", None) == "BP_ERROR":
+            self._start_bp_cooldown(self.BP_COOLDOWN_AFTER_DEVICE_ERROR, succeeded=False)
+
+    def _start_bp_cooldown(self, seconds: int, *, succeeded: bool) -> None:
+        self.bp_cooldown_seconds = seconds
+        self.bp_cooldown_succeeded = succeeded
+        self.cooldown_timer.start(1000)
+        self._set_measure_button(self.btn_bp, "BtnNIBPBusy", f"รอ\n{seconds} วินาที", False)
 
     def _measure_spo2(self) -> None:
         if SubsystemRegistry.get("spo2").disabled:
@@ -2024,6 +2047,7 @@ class CareKeeperWindow(QMainWindow):
         self.patient = PatientInfo()
         self.vitals = VitalState()
         self.bp_cooldown_seconds = 0
+        self.bp_cooldown_succeeded = True
         self.cooldown_timer.stop()
         self.btn_bp.setEnabled(True)
         self.btn_bp.setText("เริ่มวัดค่า\nความดัน")
@@ -2056,7 +2080,12 @@ class CareKeeperWindow(QMainWindow):
                 self._set_measure_button(self.btn_bp, "BtnNIBPBusy", f"รอ\n{self.bp_cooldown_seconds} วินาที", False)
                 return
         self.cooldown_timer.stop()
-        self._set_measure_button(self.btn_bp, "BtnNIBPDone", "วัดแล้ว\nความดัน", True)
+        # Come back to the state the cooldown started from: a cooldown can now
+        # follow a failure too, and that must not end up reading "วัดแล้ว".
+        if self.bp_cooldown_succeeded:
+            self._set_measure_button(self.btn_bp, "BtnNIBPDone", "วัดแล้ว\nความดัน", True)
+        else:
+            self._set_measure_button(self.btn_bp, "BtnNIBPFail", "วัดไม่สำเร็จ\nความดัน", True)
 
     def _submit_data(self) -> None:
         patient_id = "".join(ch for ch in self.patient.cid if ch.isdigit())

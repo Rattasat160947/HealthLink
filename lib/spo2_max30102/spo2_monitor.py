@@ -18,6 +18,7 @@ except ImportError:
     from max30102 import MAX30102
     from hrcalc import calc_hr_and_spo2, BUFFER_SIZE
 
+import os
 import statistics
 import sys
 import time
@@ -44,11 +45,24 @@ class SpO2Monitor():
     MAX_VALID_BPM = 220
 
     # Mean IR count below this means no finger on the sensor (ambient light
-    # only). Tune per unit if the LED currents in max30102.py are changed.
-    FINGER_IR_THRESHOLD = 50000
+    # only). Tune per unit if the LED currents in max30102.py are changed:
+    # `python -m lib.spo2_max30102.spo2_monitor --raw` prints the live IR DC
+    # level, so put a finger on and off and pick a value between the two.
+    # 50000 was too high for these breakout boards at the old 7 mA drive --
+    # a real finger sat under it, so the loop kept restarting on "no finger"
+    # until it ran out of time. Override per unit with
+    # CAREKEEPER_SPO2_FINGER_IR_THRESHOLD.
+    FINGER_IR_THRESHOLD = int(os.environ.get(
+        "CAREKEEPER_SPO2_FINGER_IR_THRESHOLD", "10000"
+    ))
 
-    def __init__(self, sensor=None, stability_window=5, stability_threshold=2.0,
-                 max_wait_seconds=30, finger_ir_threshold=None):
+    # Why a measurement came back empty, for the caller's error message.
+    ERR_NO_FINGER = "NO_FINGER"    # never saw contact for long enough
+    ERR_UNSTABLE  = "UNSTABLE"     # had contact, readings never agreed
+    ERR_WEAK      = "WEAK_SIGNAL"  # had contact, algorithm never got a value
+
+    def __init__(self, sensor=None, stability_window=5, stability_threshold=3.0,
+                 max_wait_seconds=60, finger_ir_threshold=None):
         self.bpm = 0
         self.spo2 = 0
         self.m = sensor if sensor is not None else MAX30102()
@@ -58,6 +72,9 @@ class SpO2Monitor():
         self.finger_ir_threshold = (
             self.FINGER_IR_THRESHOLD if finger_ir_threshold is None else finger_ir_threshold
         )
+        self.last_error = None      # one of the ERR_* codes after a failure
+        self.last_ir_dc = 0         # IR DC level last seen, for calibration
+        self.overflows = 0          # FIFO gaps discarded during the last run
         self._red = []
         self._ir = []
 
@@ -84,8 +101,34 @@ class SpO2Monitor():
         level of the IR channel is the cheapest contact check available --
         the equivalent of the temperature probe's skin-contact range check."""
         if len(ir) == 0:
+            self.last_ir_dc = 0
             return False
-        return float(np.mean(ir)) >= self.finger_ir_threshold
+        self.last_ir_dc = int(np.mean(ir))
+        return self.last_ir_dc >= self.finger_ir_threshold
+
+    def _fifo_overflowed(self):
+        """True if the sensor dropped samples since the last check, meaning the
+        window now splices two stretches of signal with a gap between them.
+
+        Guarded by getattr because injected/fake sensors need not model the
+        FIFO's overflow counter."""
+        count = getattr(self.m, "get_overflow_count", None)
+        if count is None:
+            return False
+        try:
+            lost = count()
+        except Exception:
+            return False
+        if not lost:
+            return False
+        self.overflows += 1
+        clear = getattr(self.m, "clear_overflow_count", None)
+        if clear is not None:
+            try:
+                clear()
+            except Exception:
+                pass
+        return True
 
     def _slide_window(self):
         """Refresh the rolling sample window: returns (red, ir, fresh_ir).
@@ -141,6 +184,8 @@ class SpO2Monitor():
         readings = []
         pulses = []
         self._clear_window()
+        self.last_error = self.ERR_NO_FINGER
+        self.overflows = 0
         start = time.time()
 
         while time.time() - start < self.max_wait_seconds:
@@ -163,6 +208,24 @@ class SpO2Monitor():
                     on_progress(None, bpm=0, stable=False, finger_detected=False)
                 continue
 
+            # Contact was made, so "no finger" is no longer the story; from
+            # here the failure is about signal quality, not placement.
+            if self.last_error == self.ERR_NO_FINGER:
+                self.last_error = self.ERR_WEAK
+
+            if self._fifo_overflowed():
+                # The sensor dropped samples while we were busy, so this window
+                # splices two stretches of signal across a gap. Peak intervals
+                # and the AC/DC ratio computed across that seam are wrong in a
+                # way nothing downstream can see, so start the window over
+                # rather than feed it to the algorithm.
+                readings.clear()
+                pulses.clear()
+                self._clear_window()
+                if on_progress:
+                    on_progress(None, bpm=0, stable=False, finger_detected=True)
+                continue
+
             if len(ir) < self.WINDOW_SAMPLES:
                 continue  # not enough signal buffered yet for the algorithm
 
@@ -176,6 +239,10 @@ class SpO2Monitor():
                 if on_progress:
                     on_progress(None, bpm=bpm, stable=False, finger_detected=True)
                 continue
+
+            # The algorithm produced a usable value, so any failure from here
+            # is the readings refusing to agree, not a signal we never got.
+            self.last_error = self.ERR_UNSTABLE
 
             readings.append(float(sp))
             pulses.append(bpm)
@@ -195,6 +262,7 @@ class SpO2Monitor():
                 valid_pulses = [p for p in pulses if p]
                 self.spo2 = int(round(statistics.median(readings)))
                 self.bpm = int(statistics.median(valid_pulses)) if valid_pulses else 0
+                self.last_error = None
                 return self.spo2
 
         return None

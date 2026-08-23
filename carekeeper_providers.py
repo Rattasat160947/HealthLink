@@ -275,6 +275,11 @@ class RealCareKeeperProvider(CareKeeperProvider):
         self.h59_device_address = h59_device_address or TEST_H59_DEVICE_ADDRESS
         self.api_url = api_url or TEST_API_URL
         self.history_api_url = history_api_url or TEST_HISTORY_API_URL
+        # Why the last blood-pressure measurement came back empty (a
+        # BPMonitor.ERR_* code), or None after a good reading. The GUI reads
+        # this to decide how long to lock the NIBP button: a device-reported
+        # BP_ERROR means the cuff has put itself into its own lockout.
+        self.last_bp_error: str | None = None
 
     def _notify_attempt(self, subsystem: str, attempt: int, max_attempts: int) -> None:
         if self.on_retry_attempt:
@@ -301,13 +306,36 @@ class RealCareKeeperProvider(CareKeeperProvider):
             address=info.address,
         )
 
+    # Seconds connect() gives the ESP32 bridge to finish booting before START
+    # is sent (it returns sooner if the bridge announces READY). Class
+    # attribute so tests can shrink it.
+    _BP_BOOT_SETTLE_SECONDS = 3.0
+
+    # Seconds to wait for a reading before calling the measurement failed. A
+    # real cuff run is well under a minute, so anything past this is a bridge
+    # that is not answering -- and every second past that point is just the
+    # operator standing there. Was 120, which made each dud cost two minutes.
+    _BP_MEASURE_TIMEOUT = 60
+
+    # measure() reports WHY it came back empty; turn that into something the
+    # operator can act on instead of one catch-all "ไม่สามารถอ่านค่าความดันได้".
+    _BP_ERROR_MESSAGES = {
+        "BP_ERROR": "เครื่องวัดความดันแจ้งข้อผิดพลาด (วัดไม่ติด/ผ้าพันแขนหลวม) กรุณารอประมาณ 2 นาทีแล้ววัดใหม่",
+        "NOT_READY": "เครื่องวัดความดันยังไม่พร้อม กรุณารอสักครู่แล้ววัดใหม่",
+        "TIMEOUT": "เครื่องวัดความดันไม่ตอบสนอง (ตรวจสอบสาย USB และสายผ้าพันแขน)",
+    }
+
     def measure_blood_pressure(self) -> BloodPressureReading:
         from lib.bp_monitor import BPMonitor
 
         port = self._resolve_bp_port()
         if port != self.bp_port:
             print(f"[BP] auto-detected serial port: {port}")
-        monitor = BPMonitor(port=port, timeout=120)
+        monitor = BPMonitor(
+            port=port,
+            timeout=self._BP_MEASURE_TIMEOUT,
+            boot_settle_seconds=self._BP_BOOT_SETTLE_SECONDS,
+        )
         retry_with_notify(
             monitor.connect,
             subsystem="bp_monitor",
@@ -316,11 +344,16 @@ class RealCareKeeperProvider(CareKeeperProvider):
         )
         try:
             result = monitor.measure()
+            reason = monitor.last_error
         finally:
             monitor.disconnect()
 
+        self.last_bp_error = None if result else reason
+
         if not result:
-            raise RuntimeError("ไม่สามารถอ่านค่าความดันได้")
+            raise RuntimeError(
+                self._BP_ERROR_MESSAGES.get(reason, "ไม่สามารถอ่านค่าความดันได้")
+            )
 
         return BloodPressureReading(
             systolic=result.sys,
@@ -369,10 +402,19 @@ class RealCareKeeperProvider(CareKeeperProvider):
         )
 
     # Seconds to keep polling the MAX30102 for a settled reading once the
-    # sensor is open (the operator needs a moment to place a finger, and the
-    # value then needs ~9 s to settle: 4 s to fill the algorithm's window plus
-    # 1 s per stability sample). Class attribute so tests can shrink it.
-    _SPO2_READ_TIMEOUT = 30.0
+    # sensor is open. The floor is ~9 s (4 s to fill the algorithm's window,
+    # then 1 s per stability sample), but every lost-contact blip throws the
+    # window away and costs that 9 s again -- at the old 30 s two fidgets used
+    # up the whole budget. Matches the temperature probe's 60 s. Class
+    # attribute so tests can shrink it.
+    _SPO2_READ_TIMEOUT = 60.0
+
+    # Why the settling loop gave up, in words the operator can act on.
+    _SPO2_ERROR_MESSAGES = {
+        "NO_FINGER": "ไม่พบนิ้วบนเซนเซอร์ SpO2 (วางนิ้วให้แนบเต็มหน้าเซนเซอร์)",
+        "WEAK_SIGNAL": "สัญญาณ SpO2 อ่อนเกินไป (วางนิ้วให้แนบสนิท ไม่กดแรง และอยู่นิ่งๆ)",
+        "UNSTABLE": "ค่า SpO2 ยังไม่นิ่ง (อยู่นิ่งๆ อย่าขยับนิ้วระหว่างวัด)",
+    }
 
     def measure_spo2(self) -> int:
         # SpO2 now comes from a MAX30102 (I2C), replacing the old H59 Bluetooth
@@ -409,8 +451,29 @@ class RealCareKeeperProvider(CareKeeperProvider):
         # measure_spo2(), which returns None if nothing ever settles.
         result = monitor.measure_spo2()
         if result is None:
-            raise RuntimeError("อ่านค่า SpO2 ไม่สำเร็จ (วางนิ้วให้แนบเซนเซอร์แล้วอยู่นิ่งๆ)")
+            raise RuntimeError(self._spo2_failure_message(monitor))
         return int(result)
+
+    def _spo2_failure_message(self, monitor) -> str:
+        """Say WHICH of the three ways it failed, and show the IR level.
+
+        "no finger" and "finger there but the value never settled" call for
+        opposite things from the operator, and one catch-all message asked for
+        both. The IR DC reading is appended because a finger that reads as
+        absent is how a mis-tuned FINGER_IR_THRESHOLD presents -- that number
+        is what CAREKEEPER_SPO2_FINGER_IR_THRESHOLD gets set against."""
+        reason = getattr(monitor, "last_error", None)
+        message = self._SPO2_ERROR_MESSAGES.get(
+            reason, "อ่านค่า SpO2 ไม่สำเร็จ (วางนิ้วให้แนบเซนเซอร์แล้วอยู่นิ่งๆ)"
+        )
+        ir_dc = getattr(monitor, "last_ir_dc", None)
+        if reason == "NO_FINGER" and ir_dc is not None:
+            threshold = getattr(monitor, "finger_ir_threshold", None)
+            message += f" [IR={ir_dc}/{threshold}]"
+        overflows = getattr(monitor, "overflows", 0)
+        if overflows:
+            message += f" (สัญญาณขาดช่วง {overflows} ครั้ง)"
+        return message
 
     def measure_temperature(self) -> float:
         # Contact body-temp probe (DS18B20, 1-Wire) from the E-Medhealth library.

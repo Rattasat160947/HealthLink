@@ -28,6 +28,8 @@ def provider(monkeypatch):
     monkeypatch.setattr(
         "serial.tools.list_ports.comports", lambda: [_fake_port("/dev/fake-port")]
     )
+    # Skip the real ESP32 boot-settle wait; no bridge is booting behind a fake.
+    monkeypatch.setattr(cp.RealCareKeeperProvider, "_BP_BOOT_SETTLE_SECONDS", 0)
     return p
 
 
@@ -48,14 +50,65 @@ def test_bp_connect_exhausts_and_disables(provider, monkeypatch):
     factory = FakeSerialFactory(fail_times=99)
     monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
 
-    # connect() propagates serial.SerialException as-is (lib/bp_monitor.py is
-    # left unchanged per the plan); retry_with_notify re-raises the original
-    # exception type once attempts are exhausted, it doesn't wrap it.
+    # connect() propagates the SerialException that open() raises; once the
+    # attempts are exhausted retry_with_notify re-raises the original
+    # exception type, it doesn't wrap it.
     with pytest.raises(serial.SerialException):
         provider.measure_blood_pressure()
 
     assert factory.calls == 3
     assert SubsystemRegistry.get("bp_monitor").disabled is True
+
+
+def test_bp_lets_the_bridge_reboot_and_drops_its_boot_chatter(provider, monkeypatch):
+    """DTR/RTS drive the ESP32's auto-reset circuit, so opening the port
+    reboots the bridge — and that is kept on purpose, so each measurement
+    starts from freshly booted firmware rather than whatever state the last
+    one left. What must not happen is START arriving before the boot ends;
+    connect() waits it out, and the boot chatter is flushed."""
+    factory = FakeSerialFactory(fail_times=0, lines=["SYS:120,DIA:80,PUL:70", "READY"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    provider.measure_blood_pressure()
+
+    port = factory.ports[-1]
+    assert port.opened_with_dtr is True
+    assert port.opened_with_rts is True
+    assert port.reset_input_calls >= 1
+
+
+def test_bp_reset_can_be_turned_off_for_slow_booting_firmware(monkeypatch):
+    """Escape hatch: deasserting the handshake lines first keeps running
+    firmware running. Off by default because a wedged firmware then stays
+    wedged, but boards that are slow to come up need it."""
+    from lib.bp_monitor import BPMonitor
+
+    factory = FakeSerialFactory(fail_times=0, lines=[])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    monitor = BPMonitor(
+        port="/dev/fake-port", boot_settle_seconds=0, reset_on_connect=False
+    )
+    monitor.connect()
+    monitor.disconnect()
+
+    port = factory.ports[-1]
+    assert port.opened_with_dtr is False
+    assert port.opened_with_rts is False
+
+
+def test_bp_device_error_reports_the_two_minute_wait(provider, monkeypatch):
+    """A BP_ERROR from the cuff must surface as its own message — the operator
+    has to wait out the device's lockout, which "ไม่สามารถอ่านค่าความดันได้" never said."""
+    factory = FakeSerialFactory(fail_times=0, lines=["BP_ERROR"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_blood_pressure()
+
+    assert "2 นาที" in str(excinfo.value)
+    # A device-reported fault is not a broken subsystem: the cuff answered.
+    assert SubsystemRegistry.get("bp_monitor").disabled is False
 
 
 def test_bp_measure_timeout_is_not_retried(provider, monkeypatch):

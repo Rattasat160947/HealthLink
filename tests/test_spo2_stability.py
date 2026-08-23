@@ -259,3 +259,138 @@ def test_progress_defaults_to_printing(spo2_module, monkeypatch, capsys):
 
     assert monitor.measure_spo2() == 97
     assert "stable" in capsys.readouterr().out
+
+
+# ── FIFO gaps ─────────────────────────────────────────────────────────────
+
+class OverflowingSensor(FakeSensor):
+    """FakeSensor that reports dropped samples after chosen reads.
+
+    A real MAX30102 stops accepting samples once its 32-deep FIFO fills, so
+    whatever is read next is contiguous in memory but has a hole in time."""
+
+    def __init__(self, overflow_after=(), **kwargs):
+        super().__init__(**kwargs)
+        self.overflow_after = set(overflow_after)
+        self.cleared = 0
+
+    def get_overflow_count(self):
+        return 7 if len(self.requested) in self.overflow_after else 0
+
+    def clear_overflow_count(self):
+        self.cleared += 1
+
+
+def test_a_window_spanning_a_fifo_gap_is_discarded(spo2_module, monkeypatch):
+    """The samples either side of a dropped-sample gap are seconds apart with
+    nothing marking the seam, so peak intervals and the AC/DC ratio across it
+    are wrong in a way nothing downstream can detect. The window has to be
+    refilled from scratch, exactly as it is after a lifted finger."""
+    sensor = OverflowingSensor(overflow_after=(2,))
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    # read 1 fills the window, read 2 slides it and then overflows, so read 3
+    # must fill from scratch rather than slide over the seam
+    assert sensor.requested[:3] == [100, 25, 100]
+    assert monitor.overflows == 1
+    assert sensor.cleared == 1
+
+
+def test_a_clean_run_reports_no_gaps(spo2_module, monkeypatch):
+    sensor = OverflowingSensor()
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert monitor.overflows == 0
+
+
+def test_sensors_without_an_overflow_counter_still_work(spo2_module, monkeypatch):
+    """Injected sensors need not model the FIFO, so the check is optional."""
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert monitor.overflows == 0
+
+
+# ── why it failed ─────────────────────────────────────────────────────────
+
+def test_failure_reason_is_no_finger_when_contact_never_happened(spo2_module, monkeypatch):
+    sensor = FakeSensor(ir_levels=(1200,))
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor, max_wait_seconds=0.15)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_NO_FINGER
+    # the observed level is kept so a mis-tuned threshold is visible
+    assert monitor.last_ir_dc == 1200
+
+
+def test_failure_reason_is_weak_signal_when_the_algorithm_got_nothing(spo2_module, monkeypatch):
+    """Finger on the sensor, but every window is uncomputable — bad contact or
+    poor perfusion, not bad placement. Telling those apart is the point."""
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [None])
+    monitor = build(spo2_module, sensor, max_wait_seconds=0.15)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_WEAK
+
+
+def test_failure_reason_is_unstable_when_values_never_agree(spo2_module, monkeypatch):
+    """Values keep arriving, they just never hold still. script_calc repeats
+    its last value (which would settle), so alternate indefinitely instead."""
+    sensor = FakeSensor()
+    flip = {"n": 0}
+
+    def alternating(ir_data, red_data):
+        flip["n"] += 1
+        return 72, True, (90.0 if flip["n"] % 2 else 99.0), True
+
+    monkeypatch.setattr(spo2_module, "calc_hr_and_spo2", alternating)
+    monitor = build(spo2_module, sensor, max_wait_seconds=0.15)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_UNSTABLE
+
+
+def test_a_settled_reading_clears_the_failure_reason(spo2_module, monkeypatch):
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert monitor.last_error is None
+
+
+# ── per-unit calibration ──────────────────────────────────────────────────
+
+def test_finger_threshold_reads_the_environment_at_import(monkeypatch):
+    """Boards differ in how much IR a finger returns, so the cutoff has to be
+    tunable on the kiosk without editing the library."""
+    fake_smbus = types.ModuleType("smbus")
+    fake_smbus.SMBus = object
+    monkeypatch.setitem(sys.modules, "smbus", fake_smbus)
+    monkeypatch.setenv("CAREKEEPER_SPO2_FINGER_IR_THRESHOLD", "25000")
+    for name in _MODULES:
+        sys.modules.pop(name, None)
+    try:
+        module = importlib.import_module("lib.spo2_max30102.spo2_monitor")
+        assert module.SpO2Monitor.FINGER_IR_THRESHOLD == 25000
+    finally:
+        for name in _MODULES:
+            sys.modules.pop(name, None)
+
+
+def test_an_ir_level_that_used_to_read_as_no_finger_now_counts(spo2_module, monkeypatch):
+    """Regression for the 50000 default: at the old cutoff this level was a
+    finger the code refused to see, and the run could only ever time out."""
+    sensor = FakeSensor(ir_levels=(30000,))
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97

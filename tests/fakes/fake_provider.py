@@ -30,6 +30,10 @@ class FakeFailingProvider(CareKeeperProvider):
         self.send_data_exception = send_data_exception
         self.sent_payloads: list[dict] = []
         self._device_status = device_status or DeviceStatus()
+        # Mirrors RealCareKeeperProvider: the BPMonitor.ERR_* code behind the
+        # last empty blood-pressure reading. The GUI reads it to size the
+        # NIBP cooldown, so the double has to carry it too.
+        self.last_bp_error: str | None = None
 
     def _maybe_fail(self, name: str) -> None:
         self._call_counts[name] = self._call_counts.get(name, 0) + 1
