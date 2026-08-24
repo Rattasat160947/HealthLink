@@ -113,6 +113,40 @@ def test_handle_line_bp_error_unblocks_measure_immediately():
     assert monitor.last_error == BPMonitor.ERR_DEVICE
 
 
+def test_handle_line_not_ready_records_the_firmware_state():
+    """NOT_READY only ever means the previous run has not finished, and the
+    firmware appends where it is stuck. MEASURING and WAIT_SHUTDOWN need
+    different advice, so the state has to survive as far as the caller."""
+    monitor = _monitor()
+
+    monitor._handle_line("NOT_READY:WAIT_SHUTDOWN")
+
+    assert monitor.busy_state == "WAIT_SHUTDOWN"
+    assert monitor.last_error == BPMonitor.ERR_NOT_READY
+    assert monitor.is_ready is False
+
+
+def test_handle_line_not_ready_without_a_state_still_parses():
+    """Firmware that predates the state suffix sends a bare NOT_READY."""
+    monitor = _monitor()
+
+    monitor._handle_line("NOT_READY")
+
+    assert monitor.busy_state is None
+    assert monitor.last_error == BPMonitor.ERR_NOT_READY
+
+
+def test_handle_line_logs_lines_it_does_not_understand(capsys):
+    """Unparsed lines used to be dropped in silence, which made "the bridge
+    said nothing" and "the bridge said something we do not parse" look
+    identical in the logs while this was being chased down."""
+    monitor = _monitor()
+
+    monitor._handle_line("rst:0x1 (POWERON_RESET),boot:0x13")
+
+    assert "rst:0x1" in capsys.readouterr().out
+
+
 def test_handle_line_not_ready_unblocks_without_ready_flag():
     monitor = _monitor()
     monitor._is_ready = False

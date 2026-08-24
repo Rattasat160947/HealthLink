@@ -1,7 +1,7 @@
 # รายงานผลการทดสอบซอฟต์แวร์ (Software Test Report) — CareKeeper
 
 - **วันที่จัดทำ:** 4 กรกฎาคม 2569 (2026-07-04)
-- **ปรับปรุงล่าสุด:** 22 สิงหาคม 2569 (2026-08-22) — เพิ่มการทดสอบการหาค่านิ่ง (stable) ของ SpO2
+- **ปรับปรุงล่าสุด:** 24 สิงหาคม 2569 (2026-08-24) — แก้อาการเครื่องวัดความดันวัดไม่ติดหลังเปิด/restart (สั่ง RESET ล้าง state ค้างของ firmware ก่อนวัด)
 - **ผู้จัดทำ:** ทีมพัฒนา CareKeeper
 - **ขอบเขต:** Unit test และ Integration test ระดับโมดูลของแอปพลิเคชัน CareKeeper (เครื่องวัดสุขภาพประจำจุดบริการ บน Raspberry Pi)
 
@@ -11,15 +11,17 @@
 
 | ตัวชี้วัด | ค่าที่วัดได้ |
 |---|---|
-| จำนวนกรณีทดสอบ (test cases) ทั้งหมด | **195** |
-| ผ่าน | **195 (100%)** |
+| จำนวนกรณีทดสอบ (test cases) ทั้งหมด | **248** |
+| ผ่าน | **248 (100%)** |
 | ไม่ผ่าน | 0 |
-| ความครอบคลุมของโค้ด (code coverage) โมดูลตรรกะ | **70%** (1,610 statements, พลาด 488) |
-| เวลาที่ใช้รันทั้งชุด | **~1.9 วินาที** |
+| ความครอบคลุมของโค้ด (code coverage) โมดูลตรรกะ | **70%** (1,797 statements, พลาด 545) |
+| เวลาที่ใช้รันทั้งชุด | **~3 วินาที** |
 | การพึ่งพาฮาร์ดแวร์/เครือข่ายจริง | **ไม่มี** — รันซ้ำได้ทุกเครื่อง (deterministic) |
 
 > เดิมชุดทดสอบมี 52 กรณี (ผ่าน 49, ไม่ผ่าน 3) coverage **57%** → ปรับปรุงเป็น 161 กรณี coverage **79%**
-> รอบล่าสุดเพิ่มเป็น **195 กรณี** ผ่านทั้งหมด ตัวหาร statements เพิ่มขึ้นจาก 1,128 เป็น 1,610 เพราะรวมไลบรารีเซนเซอร์ที่ย้ายเข้ามาใหม่
+> รอบล่าสุดเพิ่มเป็น **248 กรณี** ผ่านทั้งหมด (เพิ่มการหาค่านิ่งของ SpO2, cooldown ปุ่มวัดความดันบน GUI,
+> การสั่ง `RESET` ล้าง state ค้างของ firmware ก่อนวัด และการอ่าน `NOT_READY:<state>`)
+> ตัวหาร statements เพิ่มขึ้นจาก 1,128 เป็น 1,797 เพราะรวมไลบรารีเซนเซอร์ที่ย้ายเข้ามาใหม่
 > (`lib/spo2_max30102/*` ของ MAX30102 และ `lib/temp_sensor.py` ของ DS18B20) ซึ่งส่วนใหญ่เป็นโค้ดคุยกับฮาร์ดแวร์โดยตรง จึงทำให้ % รวมลดลงเป็น **70%**
 
 ---
@@ -55,13 +57,13 @@
 | นาฬิกา H59: แปลงแพ็กเก็ตชีพจรและ SpO2 (ขอบเขตค่า) | `test_h59_notify_parsers.py` | 23 |
 | นาฬิกา H59: ลำดับคำสั่งวัดค่า (warm-up → start → stop) | `test_h59_reader_flows.py` | 12 |
 | นาฬิกา H59: ชั้นสื่อสาร BLE (routing, keepalive, fan-out) | `test_h59_device.py` | 9 |
-| เครื่องวัดความดัน: โปรโตคอล Serial | `test_bp_monitor_parsing.py` | 14 |
-| เครื่องวัดความดัน: retry + auto-detect พอร์ต ระดับ provider | `test_providers_bp.py` | 8 |
+| **เครื่องวัดความดัน: โปรโตคอล Serial + สถานะ `NOT_READY:<state>`** | `test_bp_monitor_parsing.py` | **27** |
+| **เครื่องวัดความดัน: retry, auto-detect พอร์ต, `RESET` ก่อนวัด** | `test_providers_bp.py` | **14** |
 | บัตรประชาชน: แปลงวันเกิด พ.ศ. / TIS-620 / APDU | `test_thaiidcard.py` | 15 |
 | บัตรประชาชน: retry ระดับ provider | `test_providers_idcard.py` | 2 |
 | แบตเตอรี่ UPS: ถอดรหัส register I2C | `test_ups.py` | 15 |
-| **SpO2 (MAX30102): การหาค่านิ่ง (stable) ก่อนคืนค่าสุดท้าย** | `test_spo2_stability.py` | **14** |
-| SpO2: retry / timeout ระดับ provider | `test_providers_spo2.py` | 8 |
+| **SpO2 (MAX30102): การหาค่านิ่ง (stable) ก่อนคืนค่าสุดท้าย** | `test_spo2_stability.py` | **23** |
+| SpO2: retry / timeout ระดับ provider | `test_providers_spo2.py` | 13 |
 | Backend: ส่งผลวัด (POST add_health) | `test_providers_send_data.py` | 8 |
 | Backend: ดึงประวัติผลวัด (GET health_history) | `test_providers_history.py` | 9 |
 | คิวออฟไลน์ (SQLite): จัดเก็บ/กู้คืน | `test_queue.py` | 7 |
@@ -73,13 +75,14 @@
 | GUI: สถานะ disabled และการกดปุ่ม | `test_ui_status_disabled.py` | 6 |
 | GUI: ลำดับการบันทึกและส่งข้อมูล | `test_ui_submit_flow.py` | 3 |
 | GUI: ย่อข้อความยาวให้พอดีช่อง | `test_ui_elided_label.py` | 2 |
-| **รวม** | | **195** |
+| GUI: cooldown ปุ่มวัดความดันหลังวัดสำเร็จ/ผิดพลาด | `test_ui_bp_cooldown.py` | 9 |
+| **รวม** | | **248** |
 
 ---
 
 ## 4. ความครอบคลุมของโค้ด (Code Coverage)
 
-วัดเฉพาะโมดูลตรรกะ (business logic และตัวเชื่อมฮาร์ดแวร์) — ไม่รวม `carekeeper_ui.py` ซึ่งเป็นโค้ดจัดวางหน้าจอ Qt (มีการทดสอบพฤติกรรมแยกด้วย pytest-qt จำนวน 9 กรณีในหมวด GUI ข้างต้น)
+วัดเฉพาะโมดูลตรรกะ (business logic และตัวเชื่อมฮาร์ดแวร์) — ไม่รวม `carekeeper_ui.py` ซึ่งเป็นโค้ดจัดวางหน้าจอ Qt (มีการทดสอบพฤติกรรมแยกด้วย pytest-qt จำนวน 20 กรณีในหมวด GUI ข้างต้น)
 
 | โมดูล | Statements | พลาด | Coverage |
 |---|---:|---:|---:|
@@ -91,16 +94,16 @@
 | `carekeeper_retry.py` | 109 | 5 | **95%** |
 | `carekeeper_queue.py` | 106 | 5 | **95%** |
 | `carekeeper_logging.py` | 12 | 1 | **92%** |
-| `lib/bp_monitor.py` | 118 | 15 | **87%** |
+| `lib/spo2_max30102/spo2_monitor.py` | 161 | 28 | **83%** |
 | `lib/ups.py` | 81 | 15 | **81%** |
-| `lib/spo2_max30102/spo2_monitor.py` | 121 | 24 | **80%** |
+| `lib/bp_monitor.py` | 234 | 65 | **72%** |
 | `lib/thaiidcard/card.py` | 62 | 18 | **71%** |
-| `carekeeper_providers.py` | 462 | 143 | **69%** |
+| `carekeeper_providers.py` | 488 | 144 | **70%** |
 | `lib/h59_ble/device.py` | 119 | 44 | **63%** |
-| `lib/spo2_max30102/max30102.py` | 89 | 54 | **39%** |
+| `lib/spo2_max30102/max30102.py` | 94 | 56 | **40%** |
 | `lib/temp_sensor.py` | 81 | 63 | **22%** |
 | `lib/spo2_max30102/hrcalc.py` | 105 | 97 | **8%** |
-| **รวม** | **1,610** | **488** | **70%** |
+| **รวม** | **1,797** | **545** | **70%** |
 
 **ส่วนที่เหลือที่ยังไม่ครอบคลุม** ส่วนใหญ่เป็นโค้ดที่ต้องมีฮาร์ดแวร์/OS จริง ได้แก่ การ scan และ connect BLE จริง (`device.py`), การเรียก `nmcli`/`bluetoothctl`/`iwgetid` บน Raspberry Pi (`carekeeper_providers.py`), การเปิดพอร์ต Serial จริง (`bp_monitor.py`), การอ่าน register I2C ของ MAX30102 (`max30102.py`) และการอ่านไฟล์ 1-Wire ของ DS18B20 (`temp_sensor.py`) ซึ่งเหมาะกับการทดสอบแบบ hardware-in-the-loop มากกว่า unit test (ดูหัวข้อ 7)
 
@@ -163,7 +166,7 @@ python -m pytest tests/ --cov=carekeeper_queue --cov=carekeeper_retry \
   --cov=carekeeper_providers --cov=carekeeper_logging --cov=lib \
   --cov-report=html && open htmlcov/index.html
 
-# แสดงรายชื่อกรณีทดสอบทั้ง 195 รายการ
+# แสดงรายชื่อกรณีทดสอบทั้ง 248 รายการ
 python -m pytest tests/ --collect-only -q
 ```
 

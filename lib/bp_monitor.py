@@ -67,6 +67,8 @@ class BPMonitor:
         self._is_ready   = True
         self._last_result: Optional[BPResult] = None
         self._last_error: Optional[str] = None
+        # Which firmware state a NOT_READY came from, when it says.
+        self.busy_state: Optional[str] = None
 
         self._done_event = threading.Event()
         self._ready_event = threading.Event()
@@ -86,13 +88,30 @@ class BPMonitor:
         )
         self._thread.start()
 
-        # Give the bridge a moment to finish coming up before measure() sends
-        # START. If it announces READY sooner than that, stop waiting at once,
-        # so this is only paid in full by a board that stays silent.
+        # Opening the port does NOT reset this board -- verified on the kiosk:
+        # a START right after open() came back NOT_READY, which only happens
+        # when the firmware is still in a state left over from a previous
+        # session. So the firmware's state machine survives the app being
+        # restarted, and a run that was interrupted keeps every later START
+        # answered with NOT_READY until the module finishes and powers down
+        # (~50 s of measuring, then ~60 s to power down -- the two minutes).
+        #
+        # RESET puts it back to IDLE and is answered with READY. Firmware that
+        # predates the command ignores it silently, so this is safe to send to
+        # a board that has not been reflashed yet -- it just gets no answer,
+        # and the wait below falls through as it always did.
+        self._send("RESET")
         if self.boot_settle_seconds > 0:
             self._ready_event.wait(timeout=self.boot_settle_seconds)
 
-        print(f"[BPMonitor] Connected to {self.port}")
+        if self._ready_event.is_set():
+            print(f"[BPMonitor] Connected to {self.port} (bridge is READY)")
+        else:
+            print(
+                f"[BPMonitor] Connected to {self.port} -- no answer to RESET "
+                f"in {self.boot_settle_seconds:.0f}s (firmware without RESET "
+                "support?); measuring anyway"
+            )
 
     def disconnect(self):
         self._running = False
@@ -295,11 +314,23 @@ class BPMonitor:
             if self.on_ready:
                 self.on_ready()
 
-        elif line == "NOT_READY":
+        elif line.startswith("NOT_READY"):
+            # Firmware answers "NOT_READY:MEASURING" / "NOT_READY:WAIT_SHUTDOWN"
+            # so the caller can tell "the previous run is still going" apart
+            # from "the module is powering down" -- the waits are different.
+            _, _, state = line.partition(":")
+            self.busy_state = state.strip() or None
             self._is_ready = False
             self._last_error = self.ERR_NOT_READY
-            print("[BPMonitor] NOT_READY")
+            print(f"[BPMonitor] NOT_READY (firmware state: {self.busy_state or 'unknown'})")
             self._done_event.set()
+
+        else:
+            # Anything not recognised -- boot chatter, firmware banners, lines
+            # nobody documented. Dropping these in silence is what made "the
+            # bridge said nothing" and "the bridge said something we do not
+            # parse" impossible to tell apart from the logs.
+            print(f"[BPMonitor] <- {line!r}")
 
     @staticmethod
     def _parse_result(line: str) -> Optional[BPResult]:

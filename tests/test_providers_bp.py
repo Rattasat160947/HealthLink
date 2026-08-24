@@ -129,6 +129,46 @@ def test_bp_measure_timeout_is_not_retried(provider, monkeypatch):
     assert SubsystemRegistry.get("bp_monitor").disabled is False
 
 
+def test_bp_clears_stale_firmware_state_before_measuring(provider, monkeypatch):
+    """Opening the port does not reset this board, so the firmware's state
+    machine survives the app being restarted. An interrupted run therefore kept
+    every later START answered with NOT_READY until the module finished and
+    powered down -- the two minutes operators had to wait after a restart.
+    RESET puts it back to IDLE first."""
+    factory = FakeSerialFactory(fail_times=0, lines=["SYS:120,DIA:80,PUL:70", "READY"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    provider.measure_blood_pressure()
+
+    assert factory.ports[-1].writes == ["RESET", "START"]
+
+
+def test_bp_not_ready_says_which_state_the_firmware_is_stuck_in(provider, monkeypatch):
+    """"Still measuring" and "powering down" are both NOT_READY but need
+    different advice, so the operator is told which wait they are in."""
+    factory = FakeSerialFactory(fail_times=0, lines=["NOT_READY:WAIT_SHUTDOWN"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_blood_pressure()
+
+    assert "ปิดตัวเอง" in str(excinfo.value)
+    assert provider.last_bp_error == "NOT_READY"
+    # The cuff answered, so nothing is broken about the subsystem.
+    assert SubsystemRegistry.get("bp_monitor").disabled is False
+
+
+def test_bp_not_ready_falls_back_when_firmware_sends_no_state(provider, monkeypatch):
+    """Boards that have not been reflashed still send a bare NOT_READY."""
+    factory = FakeSerialFactory(fail_times=0, lines=["NOT_READY"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_blood_pressure()
+
+    assert "รอบก่อนหน้าไม่เสร็จ" in str(excinfo.value)
+
+
 def test_resolve_bp_port_honors_configured_when_present(provider, monkeypatch):
     provider.bp_port = "/dev/ttyUSB0"
     monkeypatch.setattr(

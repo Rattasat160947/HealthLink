@@ -23,6 +23,7 @@ class FakeSerial:
         self.opened_with_dtr = None
         self.opened_with_rts = None
         self.reset_input_calls = 0
+        self.writes: list[str] = []
         # Set by BPMonitor before open(); kept so tests can assert on them.
         self.port = None
         self.baudrate = None
@@ -47,6 +48,7 @@ class FakeSerial:
 
     def write(self, data: bytes) -> None:
         text = data.decode(errors="ignore").strip()
+        self.writes.append(text)
         if text == "START":
             self._available_lines = self._pending_lines
             self._pending_lines = []

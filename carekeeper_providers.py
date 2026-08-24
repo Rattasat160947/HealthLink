@@ -311,17 +311,24 @@ class RealCareKeeperProvider(CareKeeperProvider):
     # attribute so tests can shrink it.
     _BP_BOOT_SETTLE_SECONDS = 3.0
 
-    # Seconds to wait for a reading before calling the measurement failed. A
-    # real cuff run is well under a minute, so anything past this is a bridge
-    # that is not answering -- and every second past that point is just the
-    # operator standing there. Was 120, which made each dud cost two minutes.
-    _BP_MEASURE_TIMEOUT = 60
+    # Seconds to wait for a reading before calling the measurement failed.
+    # Measured on the kiosk: a real run takes ~50 s (START 14:19:16 -> BP_ERROR
+    # 14:20:07, and 47 s on the next one), so the old 60 s left barely ten
+    # seconds of headroom -- a slower run (weak pulse, re-inflation) would have
+    # been reported as "not responding" while the cuff was still working.
+    # Waiting longer costs nothing on the failure paths: the firmware answers
+    # NOT_READY within milliseconds and BP_ERROR as soon as the module gives
+    # up, so a long wait only happens while a measurement is genuinely running.
+    _BP_MEASURE_TIMEOUT = 90
 
     # measure() reports WHY it came back empty; turn that into something the
     # operator can act on instead of one catch-all "ไม่สามารถอ่านค่าความดันได้".
     _BP_ERROR_MESSAGES = {
         "BP_ERROR": "เครื่องวัดความดันแจ้งข้อผิดพลาด (วัดไม่ติด/ผ้าพันแขนหลวม) กรุณารอประมาณ 2 นาทีแล้ววัดใหม่",
-        "NOT_READY": "เครื่องวัดความดันยังไม่พร้อม กรุณารอสักครู่แล้ววัดใหม่",
+        # NOT_READY means the firmware still has the PREVIOUS run in progress
+        # -- it is never sent for anything else. The wait depends on where it
+        # is stuck, so _bp_not_ready_message() fills in the specific advice.
+        "NOT_READY": "เครื่องวัดความดันยังทำงานรอบก่อนหน้าไม่เสร็จ กรุณารอสักครู่แล้ววัดใหม่",
         "TIMEOUT": "เครื่องวัดความดันไม่ตอบสนอง (ตรวจสอบสาย USB และสายผ้าพันแขน)",
     }
 
@@ -345,12 +352,15 @@ class RealCareKeeperProvider(CareKeeperProvider):
         try:
             result = monitor.measure()
             reason = monitor.last_error
+            busy_state = monitor.busy_state
         finally:
             monitor.disconnect()
 
         self.last_bp_error = None if result else reason
 
         if not result:
+            if reason == "NOT_READY":
+                raise RuntimeError(self._bp_not_ready_message(busy_state))
             raise RuntimeError(
                 self._BP_ERROR_MESSAGES.get(reason, "ไม่สามารถอ่านค่าความดันได้")
             )
@@ -360,6 +370,24 @@ class RealCareKeeperProvider(CareKeeperProvider):
             diastolic=result.dia,
             pulse=result.pul,
         )
+
+    # How long each stuck firmware state actually takes to clear, measured on
+    # the kiosk: a run takes ~50 s, and the module then needs ~60 s more before
+    # it powers down and the bridge reports READY.
+    _BP_BUSY_MESSAGES = {
+        "MEASURING": "เครื่องวัดความดันกำลังวัดรอบก่อนหน้าอยู่ กรุณารอให้ผ้าพันแขนคลายลมจนสุดก่อน (ประมาณ 1 นาที)",
+        "WAIT_SHUTDOWN": "เครื่องวัดความดันกำลังปิดตัวเองหลังวัดรอบก่อน กรุณารอประมาณ 1 นาทีแล้ววัดใหม่",
+        "TRIGGER": "เครื่องวัดความดันกำลังเริ่มรอบก่อนหน้า กรุณารอสักครู่แล้ววัดใหม่",
+    }
+
+    def _bp_not_ready_message(self, busy_state: str | None) -> str:
+        """NOT_READY always means the PREVIOUS run has not finished -- the
+        firmware sends it for nothing else. Newer firmware appends the state it
+        is stuck in, which is the difference between "wait a moment" and "wait
+        a minute", so say which one when it tells us."""
+        if busy_state and busy_state in self._BP_BUSY_MESSAGES:
+            return self._BP_BUSY_MESSAGES[busy_state]
+        return self._BP_ERROR_MESSAGES["NOT_READY"]
 
     # USB vendor IDs of common USB-serial bridges (CH34x, CP210x, FTDI,
     # Prolific, Espressif native USB). Only used to PREFER the BP monitor's
