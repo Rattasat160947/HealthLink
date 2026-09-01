@@ -337,15 +337,14 @@ class RealCareKeeperProvider(CareKeeperProvider):
     # attribute so tests can shrink it.
     _BP_BOOT_SETTLE_SECONDS = 3.0
 
-    # Seconds to wait for a reading before calling the measurement failed.
-    # Measured on the kiosk: a real run takes ~50 s (START 14:19:16 -> BP_ERROR
-    # 14:20:07, and 47 s on the next one), so the old 60 s left barely ten
-    # seconds of headroom -- a slower run (weak pulse, re-inflation) would have
-    # been reported as "not responding" while the cuff was still working.
-    # Waiting longer costs nothing on the failure paths: the firmware answers
-    # NOT_READY within milliseconds and BP_ERROR as soon as the module gives
-    # up, so a long wait only happens while a measurement is genuinely running.
-    _BP_MEASURE_TIMEOUT = 90
+    # Seconds to wait for a reading before calling the measurement failed. A
+    # real cuff run (inflate + bleed down) takes 25-45 s, so this has to sit
+    # above that -- past it the bridge is not answering, and every extra second
+    # is just the operator standing there. Was 120, then 60; 50 clears the
+    # slowest real run while keeping a dud well under a minute. Longer than the
+    # other two probes on purpose: they can retry a settling window, a cuff run
+    # cannot.
+    _BP_MEASURE_TIMEOUT = 50
 
     # measure() reports WHY it came back empty; turn that into something the
     # operator can act on instead of one catch-all "ไม่สามารถอ่านค่าความดันได้".
@@ -460,11 +459,12 @@ class RealCareKeeperProvider(CareKeeperProvider):
 
     # Seconds to keep polling the MAX30102 for a settled reading once the
     # sensor is open. The floor is ~9 s (4 s to fill the algorithm's window,
-    # then 1 s per stability sample), but every lost-contact blip throws the
-    # window away and costs that 9 s again -- at the old 30 s two fidgets used
-    # up the whole budget. Matches the temperature probe's 60 s. Class
+    # then 1 s per stability sample), and every lost-contact blip throws the
+    # window away and costs that 9 s again -- so this budget allows roughly
+    # three settling attempts. Matches the temperature probe; the BP monitor
+    # gets longer because a cuff run cannot be retried mid-flight. Class
     # attribute so tests can shrink it.
-    _SPO2_READ_TIMEOUT = 60.0
+    _SPO2_READ_TIMEOUT = 30.0
 
     # Why the settling loop gave up, in words the operator can act on.
     _SPO2_ERROR_MESSAGES = {
@@ -536,12 +536,17 @@ class RealCareKeeperProvider(CareKeeperProvider):
             message += f" (สัญญาณขาดช่วง {overflows} ครั้ง)"
         return message
 
+    # Seconds the DS18B20 gets to settle before the measurement is called
+    # failed, same budget as the other two probes. Passed in rather than left
+    # to temp_sensor's own default so all three timeouts live together here.
+    _TEMP_READ_TIMEOUT = 30.0
+
     def measure_temperature(self) -> float:
         # Contact body-temp probe (DS18B20, 1-Wire) from the E-Medhealth library.
         from lib.temp_sensor import temp_sensor
 
         try:
-            sensor = temp_sensor()
+            sensor = temp_sensor(max_wait_seconds=self._TEMP_READ_TIMEOUT)
         except Exception as e:
             raise RuntimeError(f"ไม่พบเซนเซอร์อุณหภูมิ (DS18B20): {e}")
 
