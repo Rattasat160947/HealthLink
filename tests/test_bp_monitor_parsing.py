@@ -200,6 +200,19 @@ def test_measure_timeout_is_reported_as_its_own_reason():
     assert monitor.last_error == BPMonitor.ERR_TIMEOUT
 
 
+def test_measure_started_callback_fires_only_after_start_is_sent():
+    events = []
+    monitor = BPMonitor(
+        port="/dev/null",
+        on_started=lambda: events.append("started"),
+    )
+    monitor._send = lambda message: events.append(message)
+
+    monitor.measure(blocking=False)
+
+    assert events == ["START", "started"]
+
+
 # ── _read_loop: line framing ──────────────────────────────────────────────
 
 class _ChunkedPort:

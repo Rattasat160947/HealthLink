@@ -46,6 +46,19 @@ def test_bp_connect_retries_on_serial_exception_then_succeeds(provider, monkeypa
     assert SubsystemRegistry.get("bp_monitor").disabled is False
 
 
+def test_bp_progress_starts_when_driver_sends_start_not_while_connecting(provider, monkeypatch):
+    factory = FakeSerialFactory(fail_times=0, lines=["SYS:120,DIA:80,PUL:70"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+    seen = []
+    provider.on_measurement_progress = lambda kind, value, state: seen.append(
+        (kind, value, state, list(factory.ports[-1].writes))
+    )
+
+    provider.measure_blood_pressure()
+
+    assert seen == [("bp", None, {"started": True}, ["RESET", "START"])]
+
+
 def test_bp_connect_exhausts_and_disables(provider, monkeypatch):
     factory = FakeSerialFactory(fail_times=99)
     monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)

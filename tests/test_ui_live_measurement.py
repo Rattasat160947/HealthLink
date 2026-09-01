@@ -90,6 +90,22 @@ def test_temperature_real_samples_move_smoothly_then_settle(window, qtbot):
     assert window.vitals.temperature == 36.2
 
 
+def test_temperature_waiting_updates_do_not_restart_or_blink(window, qtbot):
+    window._measure_temperature()
+    qtbot.wait(130)
+    first_value = window.lbl_temp_value.text()
+    assert first_value != "--"
+
+    for _ in range(5):
+        window._on_measurement_progress(
+            "temp", 22.0, {"stable": False, "in_contact": False}
+        )
+        qtbot.wait(40)
+        assert window.lbl_temp_value.text() != "--"
+
+    assert window.lbl_temp_value.text() != first_value
+
+
 def test_remeasurement_clears_previous_value_and_failure_does_not_restore_it(window):
     window.vitals.spo2 = 97
     window._refresh_values()
@@ -134,15 +150,20 @@ def test_pressure_numbers_run_for_feedback_and_replace_old_result(window, qtbot)
     assert window.lbl_sys_value.text() == "--"
     assert window.sum_bp_value.text() == "--/--"
 
-    qtbot.wait(180)
-    assert window.lbl_sys_value.text() == "88"
-    assert window.lbl_dia_value.text() == "54"
-    assert window.lbl_pulse_value.text() == "64"
+    qtbot.wait(230)
+    assert window.lbl_sys_value.text() == "--"
 
-    qtbot.wait(180)
-    assert window.lbl_sys_value.text() != "88"
+    window._on_measurement_progress("bp", None, {"started": True})
+    qtbot.wait(230)
+    assert window.lbl_sys_value.text() == "1"
+    assert window.lbl_dia_value.text() == "1"
+    assert window.lbl_pulse_value.text() == "1"
+
+    qtbot.wait(230)
+    assert window.lbl_sys_value.text() == "2"
 
     window._on_bp_done(BloodPressureReading(118, 76, 69))
+    qtbot.wait(1000)
     assert window.lbl_sys_value.text() == "118"
     assert window.lbl_dia_value.text() == "76"
     assert window.lbl_pulse_value.text() == "69"
@@ -184,5 +205,8 @@ def test_mock_provider_progress_crosses_worker_thread_to_visible_label(
     assert win.measurement_active["spo2"] is True
 
     qtbot.waitUntil(lambda: win.measurement_active["spo2"] is False, timeout=1800)
+    qtbot.waitUntil(
+        lambda: win.lbl_spo2_value.text() == str(win.vitals.spo2), timeout=1800
+    )
     assert win.lbl_spo2_value.text() == str(win.vitals.spo2)
     assert win.lbl_system_message.text().startswith("สำเร็จ:")

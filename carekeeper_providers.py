@@ -189,6 +189,7 @@ class MockCareKeeperProvider(CareKeeperProvider):
         )
 
     def measure_blood_pressure(self) -> BloodPressureReading:
+        self._notify_measurement_progress("bp", None, started=True)
         time.sleep(1.2)
         return BloodPressureReading(
             systolic=random.randint(108, 132),
@@ -367,6 +368,9 @@ class RealCareKeeperProvider(CareKeeperProvider):
             port=port,
             timeout=self._BP_MEASURE_TIMEOUT,
             boot_settle_seconds=self._BP_BOOT_SETTLE_SECONDS,
+            on_started=lambda: self._notify_measurement_progress(
+                "bp", None, started=True
+            ),
         )
         retry_with_notify(
             monitor.connect,

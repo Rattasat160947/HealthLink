@@ -46,6 +46,7 @@ class BPMonitor:
         boot_settle_seconds: float = 3.0,
         reset_on_connect: bool = True,
         on_ready:  Optional[Callable] = None,
+        on_started: Optional[Callable[[], None]] = None,
         on_result: Optional[Callable[[BPResult], None]] = None,
         on_error:  Optional[Callable[[str], None]] = None,
     ):
@@ -56,6 +57,7 @@ class BPMonitor:
         self.boot_settle_seconds = boot_settle_seconds
         self.reset_on_connect = reset_on_connect
         self.on_ready  = on_ready
+        self.on_started = on_started
         self.on_result = on_result
         self.on_error  = on_error
 
@@ -139,6 +141,8 @@ class BPMonitor:
         self._is_ready = False
 
         self._send("START")
+        if self.on_started:
+            self.on_started()
         print("[BPMonitor] CMD Sending --> START waiting for result...")
 
         if not blocking:
