@@ -8,6 +8,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -148,6 +149,12 @@ class VitalState:
     pulse: int | None = None
     spo2: int | None = None
     temperature: float | None = None
+    # When each probe finished, so the payload can say when the reading
+    # was taken rather than leaving the backend to date it on arrival.
+    # The three finish minutes apart, which is why they are separate.
+    bp_measured_at: datetime | None = None
+    spo2_measured_at: datetime | None = None
+    temp_measured_at: datetime | None = None
 
 class ProviderTask(QThread):
     completed = Signal(object)
@@ -804,6 +811,7 @@ class CareKeeperWindow(QMainWindow):
             self.vitals.systolic = None
             self.vitals.diastolic = None
             self.vitals.pulse = None
+            self.vitals.bp_measured_at = None
             self.lbl_sys_value.setText("--")
             self.lbl_dia_value.setText("--")
             self.lbl_pulse_value.setText("--")
@@ -811,10 +819,12 @@ class CareKeeperWindow(QMainWindow):
             self.sum_pulse_value.setText("--")
         elif kind == "spo2":
             self.vitals.spo2 = None
+            self.vitals.spo2_measured_at = None
             self.lbl_spo2_value.setText("--")
             self.sum_spo2_value.setText("--")
         elif kind == "temp":
             self.vitals.temperature = None
+            self.vitals.temp_measured_at = None
             self.lbl_temp_value.setText("--")
             self.sum_temp_value.setText("--")
         self._refresh_summary_badges()
@@ -2320,6 +2330,7 @@ class CareKeeperWindow(QMainWindow):
             self.vitals.systolic = result.systolic
             self.vitals.diastolic = result.diastolic
             self.vitals.pulse = result.pulse
+            self.vitals.bp_measured_at = datetime.now()
         self._finish_measurement_display("bp", result)
         self._start_bp_cooldown(self.BP_COOLDOWN_AFTER_SUCCESS, succeeded=True)
         self._set_system_message("วัดความดันโลหิตสำเร็จ", success=True)
@@ -2354,6 +2365,7 @@ class CareKeeperWindow(QMainWindow):
 
     def _on_spo2_done(self, result: object) -> None:
         self.vitals.spo2 = int(result)
+        self.vitals.spo2_measured_at = datetime.now()
         self._finish_measurement_display("spo2", result)
         self._set_measure_button(self.btn_spo2, "BtnSpO2Done", "วัดแล้ว\nออกซิเจน", True)
         self._set_system_message("วัดออกซิเจนในเลือดสำเร็จ", success=True)
@@ -2372,6 +2384,7 @@ class CareKeeperWindow(QMainWindow):
 
     def _on_temperature_done(self, result: object) -> None:
         self.vitals.temperature = float(result)
+        self.vitals.temp_measured_at = datetime.now()
         self._finish_measurement_display("temp", result)
         self._set_measure_button(self.btn_temp, "BtnTempDone", "วัดแล้ว\nอุณหภูมิ", True)
         self._set_system_message("วัดอุณหภูมิร่างกายสำเร็จ", success=True)
@@ -2433,17 +2446,56 @@ class CareKeeperWindow(QMainWindow):
         else:
             self._set_measure_button(self.btn_bp, "BtnNIBPFail", "วัดไม่สำเร็จ\nความดัน", True)
 
+    # Format the backend already speaks: get_measurement_history() reads
+    # "YYYY-MM-DD HH:MM:SS" back out of it, so send it the same shape rather
+    # than an ISO-8601 variant its parser may or may not accept. No offset,
+    # so kiosk and backend have to agree on the timezone -- they are both in
+    # Asia/Bangkok today.
+    MEASURED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+    def _measured_at(self) -> datetime:
+        """When the vitals in this payload were taken.
+
+        The three probes finish minutes apart, so the set is only complete
+        at the last of them -- that is the moment the record describes.
+        Falls back to now() only if a submission somehow carries no
+        measurement at all, which the submit gate should already prevent."""
+        stamps = [
+            stamp
+            for stamp in (
+                self.vitals.bp_measured_at,
+                self.vitals.spo2_measured_at,
+                self.vitals.temp_measured_at,
+            )
+            if stamp is not None
+        ]
+        return max(stamps) if stamps else datetime.now()
+
     def _submit_data(self) -> None:
         patient_id = "".join(ch for ch in self.patient.cid if ch.isdigit())
         payload = {
             "mac": getattr(self.provider, "device_mac", "unknown") or "unknown",
             "patient_id": patient_id,
+            # Stamped here, not server-side: a payload can sit in the
+            # offline queue for hours when the kiosk has no network, and
+            # dating it on arrival would file the reading under the wrong
+            # time entirely.
+            "measured_at": self._measured_at().strftime(self.MEASURED_AT_FORMAT),
             "spo2": self.vitals.spo2,
             "heart_rate": self.vitals.pulse,
             "pr_bpm": self.vitals.pulse,
             "sys": self.vitals.systolic,
             "dia": self.vitals.diastolic,
             "pulse": self.vitals.pulse,
+            # Measured, shown on screen, and required before the submit
+            # button unlocks -- but until now never actually sent. The
+            # backend has had a place for it all along: the history reader
+            # pulls "temperature" back out of every record.
+            "temperature": (
+                None
+                if self.vitals.temperature is None
+                else round(self.vitals.temperature, 1)
+            ),
         }
 
         self.btn_finish.setText("กำลังบันทึกข้อมูล...")
