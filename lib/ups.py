@@ -1,4 +1,13 @@
-import smbus
+try:
+    import smbus
+except ImportError:  # pragma: no cover - depends on what is installed on the Pi
+    # `smbus` ships with the apt package python3-smbus and does not exist on
+    # PyPI, so a venv built WITHOUT --system-site-packages cannot see it and
+    # the battery silently reads as "--". smbus2 (pip, in requirement.txt) is
+    # a drop-in replacement for the three calls used here, so fall back to it
+    # instead of losing the reading.
+    import smbus2 as smbus
+
 import subprocess
 import time
 

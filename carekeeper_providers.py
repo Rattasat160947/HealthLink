@@ -631,12 +631,22 @@ class RealCareKeeperProvider(CareKeeperProvider):
 
         return records
 
+    # The UPS HAT is re-read on every status tick, so a permanently broken I2C
+    # bus would print the same line forever; keep the first reason only.
+    _battery_error_logged = False
+
     def _read_battery_percent(self) -> int | None:
         try:
             from lib.ups import UPSHat
 
             return int(UPSHat().get_battery_percent())
-        except Exception:
+        except Exception as e:
+            # The GUI can only show "--%", which does not say whether the HAT
+            # is missing, I2C is off, or the smbus module never imported --
+            # three different fixes. Say which, once, on the console.
+            if not self._battery_error_logged:
+                self._battery_error_logged = True
+                print(f"[Battery] read failed, showing '--': {type(e).__name__}: {e}")
             return None
 
     def _is_wifi_connected(self) -> bool:

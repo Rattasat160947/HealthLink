@@ -88,7 +88,8 @@ Care_Keeper/
 
 ## Phase 4 — สร้าง Python venv + ลง package
 
-**ต้องใช้ `--system-site-packages`** เพราะ `lib/ups.py` เรียก `smbus` ที่มาจาก apt (`python3-smbus`) ซึ่งไม่มีบน PyPI ถ้าสร้าง venv แบบปิดจะอ่านเปอร์เซ็นต์แบตไม่ได้
+**แนะนำให้ใช้ `--system-site-packages`** เพื่อให้ venv มองเห็น `smbus` (apt: `python3-smbus`) และ PySide6 ของระบบได้
+ตอนนี้ `lib/ups.py` มี fallback ไปใช้ `smbus2` (ลงจาก `requirement.txt`) แล้ว ถ้า `smbus` ของระบบไม่มี แบตก็ยังอ่านได้ — แต่ถ้าสร้าง venv แบบปิดแล้วแบตขึ้น `--%` ให้ดูข้อความ `[Battery] read failed` ในคอนโซลว่าติดที่ import หรือติดที่ I2C ยังไม่ได้เปิด
 
 ```bash
 cd ~/Care_Keeper && python3 -m venv --system-site-packages carekeeper
@@ -103,7 +104,8 @@ cd ~/Care_Keeper && source carekeeper/bin/activate && pip install --upgrade pip 
 ตรวจว่าลงครบจริง:
 
 ```bash
-~/Care_Keeper/carekeeper/bin/python3 -c "import PySide6, pyqtgraph, bleak, serial, smartcard, requests, dotenv, smbus; print('OK')"
+cd ~/Care_Keeper && ~/Care_Keeper/carekeeper/bin/python3 -c "import PySide6, pyqtgraph, bleak, serial, smartcard, requests, dotenv; import lib.ups; print('OK')"
+# import lib.ups ผ่าน = ได้ smbus ตัวใดตัวหนึ่ง (ของระบบ หรือ smbus2)
 ```
 
 > ถ้า `pip install PySide6` ล้มเหลว (ไม่มี wheel สำหรับ OS รุ่นนั้น) ให้ใช้ของระบบแทน — `sudo apt install -y python3-pyside6.qtwidgets python3-pyside6.qtcharts` แล้วลง pip เฉพาะตัวที่เหลือ เพราะ venv ที่สร้างแบบ `--system-site-packages` จะมองเห็น PySide6 ของระบบได้เอง
