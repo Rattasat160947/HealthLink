@@ -283,6 +283,10 @@ class RealCareKeeperProvider(CareKeeperProvider):
         # this to decide how long to lock the NIBP button: a device-reported
         # BP_ERROR means the cuff has put itself into its own lockout.
         self.last_bp_error: str | None = None
+        # The cuff module's own error code behind a BP_ERROR, when the
+        # firmware reports one. Kept next to last_bp_error so a failure
+        # can be traced to a cause rather than to a category.
+        self.last_bp_error_code: int | None = None
 
     def _notify_attempt(self, subsystem: str, attempt: int, max_attempts: int) -> None:
         if self.on_retry_attempt:
@@ -321,7 +325,7 @@ class RealCareKeeperProvider(CareKeeperProvider):
     # slowest real run while keeping a dud well under a minute. Longer than the
     # other two probes on purpose: they can retry a settling window, a cuff run
     # cannot.
-    _BP_MEASURE_TIMEOUT = 50
+    _BP_MEASURE_TIMEOUT = 60
 
     # measure() reports WHY it came back empty; turn that into something the
     # operator can act on instead of one catch-all "ไม่สามารถอ่านค่าความดันได้".
@@ -332,6 +336,10 @@ class RealCareKeeperProvider(CareKeeperProvider):
         # is stuck, so _bp_not_ready_message() fills in the specific advice.
         "NOT_READY": "เครื่องวัดความดันยังทำงานรอบก่อนหน้าไม่เสร็จ กรุณารอสักครู่แล้ววัดใหม่",
         "TIMEOUT": "เครื่องวัดความดันไม่ตอบสนอง (ตรวจสอบสาย USB และสายผ้าพันแขน)",
+        # NO_RESULT is not TIMEOUT: the cuff ran its full cycle and only
+        # the reading went missing, so the module is in its post-run
+        # lockout and the advice is to wait, not to check the cables.
+        "NO_RESULT": "เครื่องวัดความดันวัดครบรอบแล้วแต่ไม่ได้ส่งค่ากลับมา กรุณารอสักครู่แล้ววัดใหม่ (หากเกิดซ้ำบ่อย ให้ตรวจสายสัญญาณระหว่างบอร์ดกับเครื่องวัด)",
     }
 
     def measure_blood_pressure(self) -> BloodPressureReading:
@@ -358,14 +366,18 @@ class RealCareKeeperProvider(CareKeeperProvider):
             result = monitor.measure()
             reason = monitor.last_error
             busy_state = monitor.busy_state
+            error_code = monitor.error_code
         finally:
             monitor.disconnect()
 
         self.last_bp_error = None if result else reason
+        self.last_bp_error_code = None if result else error_code
 
         if not result:
             if reason == "NOT_READY":
                 raise RuntimeError(self._bp_not_ready_message(busy_state))
+            if reason == "BP_ERROR":
+                raise RuntimeError(self._bp_device_error_message(error_code))
             raise RuntimeError(
                 self._BP_ERROR_MESSAGES.get(reason, "ไม่สามารถอ่านค่าความดันได้")
             )
@@ -375,6 +387,46 @@ class RealCareKeeperProvider(CareKeeperProvider):
             diastolic=result.dia,
             pulse=result.pul,
         )
+
+    # What the module's own error code means. The module ends a bad run with
+    # "end test,err:<n>" and the firmware forwards <n> as "BP_ERROR:<n>".
+    # That number is the only thing separating "the arm moved" from "the cuff
+    # is loose" from "the air line leaks" -- all three look identical to
+    # everyone downstream of it.
+    #
+    # The vendor's table for this module is not in the repo, so nothing here
+    # is guessed: every row was produced by making the failure happen on the
+    # kiosk and reading the code back (sensor_tests/bp_error_codes.py, logged
+    # in sensor_tests/bp-error-codes.log). A code with no row reaches the
+    # operator as a number rather than as advice that might send them to fix
+    # the wrong thing.
+    _BP_DEVICE_CODE_MESSAGES: dict[int, str] = {
+        # Negative codes are the firmware's own, not the module's.
+        -1: "เครื่องวัดความดันหยุดตอบระหว่างวัด รอบวัดถูกตัดอัตโนมัติ กรุณาตรวจสายสัญญาณระหว่างบอร์ดกับเครื่องวัด แล้ววัดใหม่",
+        # Observed 1 Sep 2026. 4 came back from BOTH 'cuff not on an arm'
+        # and 'cuff wrapped loose' -- the module could not build or hold
+        # pressure. The wording covers both, because the code does not
+        # separate them and guessing which one it is helps nobody.
+        4: "ผ้าพันแขนหลวมหรือยังไม่ได้พันแขน กรุณาพันผ้าพันแขนให้แน่นพอดี ให้ขอบล่างอยู่เหนือข้อพับแขนประมาณ 2 ซม. แล้ววัดใหม่",
+        # Observed 1 Sep 2026 from moving the arm mid-run. Worded as "could
+        # not read the signal, usually movement" rather than "you moved":
+        # one run is enough to know movement produces this code, not enough
+        # to know that nothing else does.
+        6: "เครื่องวัดอ่านสัญญาณไม่ได้ (มักเกิดจากการขยับแขนหรือพูดคุยระหว่างวัด) กรุณานั่งนิ่ง วางแขนระดับหัวใจ แล้ววัดใหม่",
+    }
+
+    def _bp_device_error_message(self, code: int | None) -> str:
+        """A BP_ERROR with the module's reason attached when we can name it.
+
+        An unmapped code still goes on screen: a number the operator can
+        write down and report beats a guess at what went wrong, and it is
+        how _BP_DEVICE_CODE_MESSAGES gets filled in."""
+        base = self._BP_ERROR_MESSAGES["BP_ERROR"]
+        if code is None:
+            return base
+        if code in self._BP_DEVICE_CODE_MESSAGES:
+            return self._BP_DEVICE_CODE_MESSAGES[code]
+        return f"{base} (รหัสจากเครื่องวัด: {code})"
 
     # How long each stuck firmware state actually takes to clear, measured on
     # the kiosk: a run takes ~50 s, and the module then needs ~60 s more before

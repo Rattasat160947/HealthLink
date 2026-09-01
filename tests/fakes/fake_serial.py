@@ -17,9 +17,12 @@ class FakeSerial:
     fake models that two-step flow: `fail_open` makes open() raise the way a
     missing port does."""
 
-    def __init__(self, lines=None, fail_open: bool = False):
+    def __init__(self, lines=None, fail_open: bool = False, status_reply=None):
         self.is_open = False
         self.fail_open = fail_open
+        # What the firmware answers to STATUS, e.g. "STATE:IDLE". None
+        # models a board that predates the command and stays silent.
+        self.status_reply = status_reply
         self.opened_with_dtr = None
         self.opened_with_rts = None
         self.reset_input_calls = 0
@@ -49,8 +52,11 @@ class FakeSerial:
     def write(self, data: bytes) -> None:
         text = data.decode(errors="ignore").strip()
         self.writes.append(text)
+        if text == "STATUS" and self.status_reply is not None:
+            self._available_lines.append(self.status_reply)
+            self.in_waiting = 1
         if text == "START":
-            self._available_lines = self._pending_lines
+            self._available_lines.extend(self._pending_lines)
             self._pending_lines = []
             self.in_waiting = 1 if self._available_lines else 0
 
@@ -70,9 +76,10 @@ class FakeSerialFactory:
     fails to open for the first `fail_times` calls, then opens normally and
     serves `lines`. `calls` counts constructions, one per connect() attempt."""
 
-    def __init__(self, fail_times: int = 0, lines=None):
+    def __init__(self, fail_times: int = 0, lines=None, status_reply=None):
         self.fail_times = fail_times
         self.lines = lines or []
+        self.status_reply = status_reply
         self.calls = 0
         self.ports: list[FakeSerial] = []
 
@@ -81,6 +88,7 @@ class FakeSerialFactory:
         port = FakeSerial(
             lines=list(self.lines),
             fail_open=self.calls <= self.fail_times,
+            status_reply=self.status_reply,
         )
         self.ports.append(port)
         return port

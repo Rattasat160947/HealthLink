@@ -37,6 +37,15 @@ class BPMonitor:
     ERR_DEVICE    = "BP_ERROR"
     ERR_NOT_READY = "NOT_READY"
     ERR_TIMEOUT   = "TIMEOUT"
+    # The cuff ran a full cycle but the reading never arrived. Not a
+    # TIMEOUT: nothing was silent, the run simply ended empty, and the
+    # module is now in the same post-run lockout a good run leaves behind.
+    ERR_NO_RESULT = "NO_RESULT"
+
+    # Firmware states that mean the PREVIOUS run has not finished. RESET
+    # would rewind the ESP32's state machine while the cuff itself keeps
+    # going, so connect() leaves these alone and lets measure() report them.
+    _BUSY_STATES = {"TRIGGER", "MEASURING", "WAIT_SHUTDOWN"}
 
     def __init__(
         self,
@@ -44,6 +53,7 @@ class BPMonitor:
         baudrate: int = 115200,
         timeout: float = 60.0,
         boot_settle_seconds: float = 3.0,
+        status_reply_seconds: Optional[float] = None,
         reset_on_connect: bool = True,
         on_ready:  Optional[Callable] = None,
         on_started: Optional[Callable[[], None]] = None,
@@ -55,6 +65,14 @@ class BPMonitor:
         self.baudrate  = baudrate
         self.timeout   = timeout
         self.boot_settle_seconds = boot_settle_seconds
+        # How long connect() waits for the firmware's answer to STATUS
+        # before falling back to RESET. Derived from the boot settle so a
+        # caller (or a test) that shrinks one shrinks both.
+        self.status_reply_seconds = (
+            min(1.0, boot_settle_seconds)
+            if status_reply_seconds is None
+            else status_reply_seconds
+        )
         self.reset_on_connect = reset_on_connect
         self.on_ready  = on_ready
         self.on_started = on_started
@@ -69,11 +87,17 @@ class BPMonitor:
         self._is_ready   = True
         self._last_result: Optional[BPResult] = None
         self._last_error: Optional[str] = None
+        # The number in "BP_ERROR:<n>": the module's own reason for
+        # rejecting the run. None on firmware that sends a bare BP_ERROR.
+        self.error_code: Optional[int] = None
         # Which firmware state a NOT_READY came from, when it says.
         self.busy_state: Optional[str] = None
+        # What STATUS answered at connect(), on firmware that knows it.
+        self.firmware_state: Optional[str] = None
 
         self._done_event = threading.Event()
         self._ready_event = threading.Event()
+        self._status_event = threading.Event()
         self._partial = b""   # leftover bytes of a line split across two reads
 
     # ─────────────────────────────────────────
@@ -84,24 +108,57 @@ class BPMonitor:
         self._ser = self._open_port()
         self._running = True
         self._ready_event.clear()
+        self._status_event.clear()
+        self.firmware_state = None
+        self.busy_state = None
+        self.error_code = None
         self._partial = b""
         self._thread = threading.Thread(
             target=self._read_loop, daemon=True
         )
         self._thread.start()
 
-        # Opening the port does NOT reset this board -- verified on the kiosk:
-        # a START right after open() came back NOT_READY, which only happens
-        # when the firmware is still in a state left over from a previous
-        # session. So the firmware's state machine survives the app being
-        # restarted, and a run that was interrupted keeps every later START
-        # answered with NOT_READY until the module finishes and powers down
-        # (~50 s of measuring, then ~60 s to power down -- the two minutes).
+        # Ask before clearing. RESET only rewinds the ESP32's state machine --
+        # the cuff module keeps measuring, or keeps powering down, regardless,
+        # and it needs ~60 s after a run before it will start another. A RESET
+        # sent into that window reports READY for a module that is still busy,
+        # and the START right behind it presses the module's button mid-cycle:
+        # that is the run which comes back BP_ERROR, or with nothing at all,
+        # for no reason the operator can see.
         #
-        # RESET puts it back to IDLE and is answered with READY. Firmware that
-        # predates the command ignores it silently, so this is safe to send to
-        # a board that has not been reflashed yet -- it just gets no answer,
-        # and the wait below falls through as it always did.
+        # STATUS is read-only, so asking first costs a second at most, and it
+        # tells us which of the two situations we are actually in.
+        self._send("STATUS")
+
+        if self._wait_for_status(self.status_reply_seconds):
+            if self.firmware_state in self._BUSY_STATES:
+                # The previous run really is still going. Say so now -- fast
+                # and specific -- instead of resetting on top of it and making
+                # the operator sit out a measurement that cannot work.
+                self.busy_state = self.firmware_state
+                self._is_ready = False
+                self._last_error = self.ERR_NOT_READY
+                print(
+                    f"[BPMonitor] Connected to {self.port} -- previous run "
+                    f"still in progress (firmware state: {self.firmware_state});"
+                    " leaving it alone"
+                )
+            else:
+                self._is_ready = True
+                state = self.firmware_state or "READY"
+                print(f"[BPMonitor] Connected to {self.port} (firmware state: {state})")
+            return
+
+        # Nothing answered STATUS: firmware that predates the command, or a
+        # board still in its bootloader. Fall back to what has always happened
+        # here. Opening the port does NOT reset this board -- verified on the
+        # kiosk: a START right after open() came back NOT_READY, which only
+        # happens when the firmware is still in a state left over from a
+        # previous session. So the state machine survives the app being
+        # restarted, and RESET is the only way to clear a run that was
+        # interrupted. Firmware that predates RESET ignores it silently, so
+        # sending it stays safe -- it just gets no answer, and the wait below
+        # falls through as it always did.
         self._send("RESET")
         if self.boot_settle_seconds > 0:
             self._ready_event.wait(timeout=self.boot_settle_seconds)
@@ -110,9 +167,9 @@ class BPMonitor:
             print(f"[BPMonitor] Connected to {self.port} (bridge is READY)")
         else:
             print(
-                f"[BPMonitor] Connected to {self.port} -- no answer to RESET "
-                f"in {self.boot_settle_seconds:.0f}s (firmware without RESET "
-                "support?); measuring anyway"
+                f"[BPMonitor] Connected to {self.port} -- no answer to STATUS "
+                f"or RESET in {self.boot_settle_seconds:.0f}s (firmware without "
+                "either command?); measuring anyway"
             )
 
     def disconnect(self):
@@ -137,6 +194,7 @@ class BPMonitor:
 
         self._last_result = None
         self._last_error  = None
+        self.error_code   = None
         self._done_event.clear()
         self._is_ready = False
 
@@ -174,6 +232,21 @@ class BPMonitor:
     # ─────────────────────────────────────────
     # Internal
     # ─────────────────────────────────────────
+    def _wait_for_status(self, timeout: float) -> bool:
+        """Wait for the firmware's answer to STATUS.
+
+        A spontaneous READY counts as an answer: it is the boot announcement,
+        and it says the state machine is IDLE just as clearly as STATE:IDLE
+        does. False means nothing came back at all -- firmware that predates
+        the STATUS command, or a board still in its bootloader."""
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while time.monotonic() < deadline:
+            if self._status_event.wait(timeout=0.02):
+                return True
+            if self._ready_event.is_set():
+                return True
+        return self._status_event.is_set() or self._ready_event.is_set()
+
     def _open_port(self) -> serial.Serial:
         """Open the port and let the ESP32 bridge reboot as it always has.
 
@@ -299,18 +372,57 @@ class BPMonitor:
                 # reaches the screen without the firmware's SYS->READY delay.
                 self._done_event.set()
 
-        # ── Error: "BP_ERROR" ──
-        elif line == "BP_ERROR":
+        # ── Error: "BP_ERROR" / "BP_ERROR:<code>" ──
+        elif line == "BP_ERROR" or line.startswith("BP_ERROR:"):
+            # The code is the module's answer to WHY, and it is the only
+            # thing separating a moved arm from a loose cuff from a leaking
+            # air line. Firmware that predates the suffix sends a bare
+            # BP_ERROR, which stays exactly as it was.
+            _, _, code = line.partition(":")
+            self.error_code = self._parse_error_code(code)
             self._last_error = self.ERR_DEVICE
-            print("\n[BPMonitor] Measurement Error — please wait 2 min\n")
+            detail = "" if self.error_code is None else f" (device code {self.error_code})"
+            print(f"\n[BPMonitor] Measurement Error{detail} — please wait 2 min\n")
             if self.on_error:
-                self.on_error("BP_ERROR")
+                self.on_error(line)
             # The device has already given its verdict, so stop waiting. This
             # used to fall through and let measure() burn its whole 120 s
             # timeout on a failure that was known within ~20 s.
             self._done_event.set()
 
+        elif line == "NO_RESULT":
+            # The cuff finished its cycle without the result packet ever
+            # arriving (a UART overrun on the bridge, a split line). The
+            # measurement did happen -- the patient sat through all of it --
+            # so this is not a timeout, and the module is now in the same
+            # post-run lockout a successful run leaves behind.
+            self._last_error = self.ERR_NO_RESULT
+            print("[BPMonitor] Measurement finished but no reading was sent")
+            if self.on_error:
+                self.on_error("NO_RESULT")
+            self._done_event.set()
+
+        elif line.startswith("STATE:"):
+            # Answer to STATUS. connect() reads it to decide whether the
+            # firmware is free or is still finishing the previous run.
+            _, _, state = line.partition(":")
+            self.firmware_state = state.strip() or None
+            self._status_event.set()
+            print(f"[BPMonitor] firmware state: {self.firmware_state or 'unknown'}")
+
         elif line == "READY":
+            # READY closes a measurement as well as announcing a boot. Closing
+            # one that produced neither a reading nor an error means the run
+            # ended empty -- the same thing NO_RESULT reports, on firmware old
+            # enough not to send it. Naming it here is what keeps that case
+            # from reaching the operator as a bare "could not read".
+            if (
+                not self._is_ready
+                and self._last_result is None
+                and self._last_error is None
+            ):
+                self._last_error = self.ERR_NO_RESULT
+                print("[BPMonitor] run ended without a reading")
             self._is_ready = True
             self._ready_event.set()
             self._done_event.set()
@@ -335,6 +447,18 @@ class BPMonitor:
             # bridge said nothing" and "the bridge said something we do not
             # parse" impossible to tell apart from the logs.
             print(f"[BPMonitor] <- {line!r}")
+
+    @staticmethod
+    def _parse_error_code(text: str) -> Optional[int]:
+        """The number in "BP_ERROR:<n>", or None when there is not one.
+
+        Anything unparseable is treated as no code rather than as some
+        code: downstream turns a code into advice, and wrong advice about
+        why a measurement failed is worse than none."""
+        try:
+            return int(text.strip())
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _parse_result(line: str) -> Optional[BPResult]:

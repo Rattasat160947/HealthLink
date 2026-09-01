@@ -113,3 +113,23 @@ def test_session_reset_clears_a_running_cooldown(window):
     assert window.cooldown_timer.isActive() is False
     assert window.btn_bp.objectName() == "BtnNIBP"
     assert window.btn_bp.isEnabled() is True
+
+
+def test_no_result_holds_the_button_like_a_device_error(window):
+    """A run that ended without a reading still ran the full cycle, so the
+    module is in the same post-run lockout a BP_ERROR leaves behind."""
+    window.provider.last_bp_error = "NO_RESULT"
+
+    window._on_bp_failed("เครื่องวัดความดันวัดครบรอบแล้วแต่ไม่ได้ส่งค่ากลับมา")
+
+    assert window.bp_cooldown_seconds == window.BP_COOLDOWN_AFTER_DEVICE_ERROR
+    assert window.cooldown_timer.isActive()
+    assert window.btn_bp.isEnabled() is False
+
+
+def test_success_cooldown_clears_the_modules_power_down_window(window):
+    """The module needs ~60 s after the reading before it accepts another run,
+    so the cooldown has to sit above that, not exactly on it."""
+    window._on_bp_done(BloodPressureReading(systolic=120, diastolic=80, pulse=70))
+
+    assert window.bp_cooldown_seconds > 60

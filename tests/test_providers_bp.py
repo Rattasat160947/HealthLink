@@ -56,7 +56,7 @@ def test_bp_progress_starts_when_driver_sends_start_not_while_connecting(provide
 
     provider.measure_blood_pressure()
 
-    assert seen == [("bp", None, {"started": True}, ["RESET", "START"])]
+    assert seen == [("bp", None, {"started": True}, ["STATUS", "RESET", "START"])]
 
 
 def test_bp_connect_exhausts_and_disables(provider, monkeypatch):
@@ -147,13 +147,14 @@ def test_bp_clears_stale_firmware_state_before_measuring(provider, monkeypatch):
     machine survives the app being restarted. An interrupted run therefore kept
     every later START answered with NOT_READY until the module finished and
     powered down -- the two minutes operators had to wait after a restart.
-    RESET puts it back to IDLE first."""
+    RESET puts it back to IDLE first -- but only once STATUS has gone
+    unanswered, which is how firmware without either command behaves."""
     factory = FakeSerialFactory(fail_times=0, lines=["SYS:120,DIA:80,PUL:70", "READY"])
     monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
 
     provider.measure_blood_pressure()
 
-    assert factory.ports[-1].writes == ["RESET", "START"]
+    assert factory.ports[-1].writes == ["STATUS", "RESET", "START"]
 
 
 def test_bp_not_ready_says_which_state_the_firmware_is_stuck_in(provider, monkeypatch):
@@ -227,3 +228,178 @@ def test_resolve_bp_port_raises_when_no_usb_serial_present(provider, monkeypatch
     )
     with pytest.raises(RuntimeError):
         provider._resolve_bp_port()
+
+
+# ── STATUS before RESET ───────────────────────────────────────────────────
+
+@pytest.fixture
+def status_provider(provider, monkeypatch):
+    """Same provider, but with a boot settle long enough for STATUS to be
+    answered. The base fixture zeroes it, which is the no-answer path."""
+    monkeypatch.setattr(cp.RealCareKeeperProvider, "_BP_BOOT_SETTLE_SECONDS", 0.5)
+    return provider
+
+
+def test_bp_skips_the_reset_when_the_firmware_says_it_is_idle(status_provider, monkeypatch):
+    """RESET is a recovery step, not part of every measurement. Firmware that
+    answers STATUS can say it is free, and then there is nothing to recover."""
+    factory = FakeSerialFactory(
+        fail_times=0,
+        lines=["SYS:120,DIA:80,PUL:70", "READY"],
+        status_reply="STATE:IDLE",
+    )
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    result = status_provider.measure_blood_pressure()
+
+    assert result.systolic == 120
+    assert factory.ports[-1].writes == ["STATUS", "START"]
+
+
+def test_bp_leaves_a_running_module_alone_instead_of_resetting_it(status_provider, monkeypatch):
+    """The bug this closes: RESET rewinds the ESP32 while the cuff itself is
+    still powering down, so the bridge reports READY and START then presses the
+    module's button mid-cycle. Asking first turns that into an immediate,
+    specific message and never touches the module at all."""
+    factory = FakeSerialFactory(
+        fail_times=0,
+        lines=["SYS:120,DIA:80,PUL:70", "READY"],
+        status_reply="STATE:WAIT_SHUTDOWN",
+    )
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        status_provider.measure_blood_pressure()
+
+    assert "ปิดตัวเอง" in str(excinfo.value)
+    assert status_provider.last_bp_error == "NOT_READY"
+    # Neither command was sent: no state was cleared and no button was pressed.
+    assert factory.ports[-1].writes == ["STATUS"]
+    assert SubsystemRegistry.get("bp_monitor").disabled is False
+
+
+def test_bp_measuring_state_gets_its_own_wait_advice(status_provider, monkeypatch):
+    factory = FakeSerialFactory(fail_times=0, lines=[], status_reply="STATE:MEASURING")
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        status_provider.measure_blood_pressure()
+
+    assert "กำลังวัดรอบก่อนหน้า" in str(excinfo.value)
+
+
+# ── a run that ends without a reading ─────────────────────────────────────
+
+def test_bp_run_that_ends_empty_is_not_reported_as_no_response(provider, monkeypatch):
+    """The cuff finished its cycle and only the reading went missing. Reporting
+    that as "ไม่ตอบสนอง" sent the operator to check cables that were fine, and
+    hid the fact that the patient had just sat through a full measurement."""
+    factory = FakeSerialFactory(fail_times=0, lines=["READY"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_blood_pressure()
+
+    assert "วัดครบรอบแล้วแต่ไม่ได้ส่งค่ากลับมา" in str(excinfo.value)
+    assert provider.last_bp_error == "NO_RESULT"
+    assert SubsystemRegistry.get("bp_monitor").disabled is False
+
+
+def test_bp_firmware_no_result_line_reports_the_same_thing(provider, monkeypatch):
+    """Reflashed firmware says it outright instead of leaving the host to infer
+    it from a READY with nothing before it."""
+    factory = FakeSerialFactory(fail_times=0, lines=["NO_RESULT"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_blood_pressure()
+
+    assert "วัดครบรอบแล้วแต่ไม่ได้ส่งค่ากลับมา" in str(excinfo.value)
+    assert provider.last_bp_error == "NO_RESULT"
+
+
+# ── the module's own error code reaches the operator ──────────────────────
+
+def test_bp_unmapped_device_code_is_shown_as_a_number(provider, monkeypatch):
+    """Nothing is guessed about a code we have not observed, but the number
+    still goes on screen -- it is what turns "it failed again" into a report
+    someone can act on, and it is how the table gets filled in."""
+    factory = FakeSerialFactory(fail_times=0, lines=["BP_ERROR:3"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_blood_pressure()
+
+    assert "รหัสจากเครื่องวัด: 3" in str(excinfo.value)
+    assert provider.last_bp_error == "BP_ERROR"
+    assert provider.last_bp_error_code == 3
+
+
+def test_bp_mapped_device_code_replaces_the_generic_message(provider, monkeypatch):
+    """-1 is the firmware's own: the module went silent and its watchdog cut
+    the run. Telling the operator to wait two minutes for a cuff lockout that
+    never happened would send them to the wrong place."""
+    factory = FakeSerialFactory(fail_times=0, lines=["BP_ERROR:-1"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_blood_pressure()
+
+    message = str(excinfo.value)
+    assert "หยุดตอบระหว่างวัด" in message
+    assert "2 นาที" not in message
+    assert provider.last_bp_error_code == -1
+
+
+def test_bp_bare_device_error_message_is_unchanged(provider, monkeypatch):
+    """Boards that have not been reflashed still send a bare BP_ERROR, and must
+    still get the plain two-minute advice with no dangling code."""
+    factory = FakeSerialFactory(fail_times=0, lines=["BP_ERROR"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_blood_pressure()
+
+    message = str(excinfo.value)
+    assert "2 นาที" in message
+    assert "รหัส" not in message
+    assert provider.last_bp_error_code is None
+
+
+def test_bp_success_clears_a_code_left_by_an_earlier_failure(provider, monkeypatch):
+    factory = FakeSerialFactory(fail_times=0, lines=["BP_ERROR:3"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+    with pytest.raises(RuntimeError):
+        provider.measure_blood_pressure()
+
+    factory = FakeSerialFactory(fail_times=0, lines=["SYS:120,DIA:80,PUL:70", "READY"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+    provider.measure_blood_pressure()
+
+    assert provider.last_bp_error is None
+    assert provider.last_bp_error_code is None
+
+
+@pytest.mark.parametrize(
+    "code, expected_phrase",
+    [
+        # Both "no cuff at all" and "cuff wrapped loose" answer 4, so the
+        # message has to cover both rather than pick one.
+        (4, "ผ้าพันแขนหลวมหรือยังไม่ได้พันแขน"),
+        (6, "ขยับแขน"),
+    ],
+)
+def test_bp_observed_device_codes_name_the_cause(provider, monkeypatch, code, expected_phrase):
+    """Codes 4 and 6 were produced deliberately on the kiosk and logged, so
+    these two say what to fix instead of showing a bare number."""
+    factory = FakeSerialFactory(fail_times=0, lines=[f"BP_ERROR:{code}"])
+    monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_blood_pressure()
+
+    message = str(excinfo.value)
+    assert expected_phrase in message
+    # A named cause replaces the number; showing both would just be noise.
+    assert "รหัสจากเครื่องวัด" not in message
+    assert provider.last_bp_error_code == code

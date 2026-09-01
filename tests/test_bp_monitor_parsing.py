@@ -292,3 +292,164 @@ def test_read_loop_keeps_separate_lines_separate():
     assert monitor.last_result == BPResult(sys=130, dia=85, pul=60)
     assert monitor.is_ready is True
     assert ready == [True]
+
+
+# ── STATUS reply ──────────────────────────────────────────────────────────
+
+def test_handle_line_state_records_the_firmware_state():
+    monitor = _monitor()
+
+    monitor._handle_line("STATE:WAIT_SHUTDOWN")
+
+    assert monitor.firmware_state == "WAIT_SHUTDOWN"
+    assert monitor._status_event.is_set()
+
+
+def test_handle_line_state_without_a_name_still_counts_as_an_answer():
+    monitor = _monitor()
+
+    monitor._handle_line("STATE:")
+
+    assert monitor.firmware_state is None
+    assert monitor._status_event.is_set()
+
+
+def test_wait_for_status_treats_a_boot_ready_as_an_answer():
+    """A board that announces itself has told us it is IDLE; asking again would
+    only add a second to every measurement."""
+    monitor = _monitor()
+    monitor._handle_line("READY")
+
+    assert monitor._wait_for_status(0.0) is True
+
+
+def test_wait_for_status_returns_false_when_nothing_answers():
+    """Firmware that predates STATUS -- connect() falls back to RESET."""
+    monitor = _monitor()
+
+    assert monitor._wait_for_status(0.02) is False
+
+
+# ── a run that ends without a reading ─────────────────────────────────────
+
+def test_handle_line_no_result_is_its_own_reason():
+    errors = []
+    monitor = _monitor(on_error=errors.append)
+    monitor._done_event.clear()
+
+    monitor._handle_line("NO_RESULT")
+
+    assert monitor.last_error == BPMonitor.ERR_NO_RESULT
+    assert monitor._done_event.is_set()
+    assert errors == ["NO_RESULT"]
+
+
+def test_ready_closing_a_run_that_produced_nothing_reports_no_result():
+    """Older firmware just goes quiet and then says READY. measure() used to
+    come back empty with last_error still None, which the provider could only
+    render as a bare "could not read"."""
+    monitor = _monitor()
+    monitor._is_ready = False      # as measure() leaves it
+    monitor._done_event.clear()
+
+    monitor._handle_line("READY")
+
+    assert monitor.last_error == BPMonitor.ERR_NO_RESULT
+
+
+def test_boot_ready_is_not_mistaken_for_an_empty_run():
+    """No measurement is in flight at connect() time, so the announcement the
+    board makes on boot must not be blamed for a missing reading."""
+    monitor = _monitor()
+
+    monitor._handle_line("READY")
+
+    assert monitor.last_error is None
+
+
+def test_ready_after_a_good_reading_leaves_the_result_alone():
+    monitor = _monitor()
+    monitor._is_ready = False
+
+    monitor._handle_line("SYS:120,DIA:80,PUL:70")
+    monitor._handle_line("READY")
+
+    assert monitor.last_error is None
+    assert monitor.last_result == BPResult(sys=120, dia=80, pul=70)
+
+
+def test_ready_after_a_device_error_keeps_the_device_error():
+    """BP_ERROR is the more specific verdict of the two; the READY that follows
+    the cuff's lockout must not overwrite it."""
+    monitor = _monitor()
+    monitor._is_ready = False
+
+    monitor._handle_line("BP_ERROR")
+    monitor._handle_line("READY")
+
+    assert monitor.last_error == BPMonitor.ERR_DEVICE
+
+
+# ── the module's own error code ───────────────────────────────────────────
+
+def test_handle_line_bp_error_keeps_the_device_code():
+    """"BP_ERROR:3" is still a device error -- the code rides alongside it so
+    the reason survives as far as the operator, without changing what the GUI
+    keys its cuff lockout off."""
+    monitor = _monitor()
+
+    monitor._handle_line("BP_ERROR:3")
+
+    assert monitor.last_error == BPMonitor.ERR_DEVICE
+    assert monitor.error_code == 3
+    assert monitor._done_event.is_set()
+
+
+def test_handle_line_bp_error_passes_the_whole_line_to_the_callback():
+    errors = []
+    monitor = _monitor(on_error=errors.append)
+
+    monitor._handle_line("BP_ERROR:7")
+
+    assert errors == ["BP_ERROR:7"]
+
+
+def test_handle_line_bare_bp_error_has_no_code():
+    """Firmware that predates the suffix behaves exactly as it always did."""
+    monitor = _monitor()
+
+    monitor._handle_line("BP_ERROR")
+
+    assert monitor.last_error == BPMonitor.ERR_DEVICE
+    assert monitor.error_code is None
+
+
+def test_handle_line_negative_device_code_survives():
+    """Negative codes are the firmware's own (a run its watchdog cut short),
+    not the module's, so they must not be mistaken for junk."""
+    monitor = _monitor()
+
+    monitor._handle_line("BP_ERROR:-1")
+
+    assert monitor.error_code == -1
+
+
+@pytest.mark.parametrize("suffix", ["", "abc", " "])
+def test_handle_line_unparseable_code_is_no_code_rather_than_a_wrong_one(suffix):
+    """A code becomes advice downstream. Advice built on a misread number would
+    send the operator to fix the wrong thing."""
+    monitor = _monitor()
+
+    monitor._handle_line(f"BP_ERROR:{suffix}")
+
+    assert monitor.last_error == BPMonitor.ERR_DEVICE
+    assert monitor.error_code is None
+
+
+def test_measure_clears_the_code_from_the_previous_run():
+    monitor = BPMonitor(port="/dev/null", timeout=0.05)
+    monitor._handle_line("BP_ERROR:3")
+
+    monitor.measure()
+
+    assert monitor.error_code is None

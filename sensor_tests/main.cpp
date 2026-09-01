@@ -106,8 +106,20 @@ void callback_Result() {
   Serial.printf("SYS:%d,DIA:%d,PUL:%d\n", SYS, DIA, PUL);
 }
 
-void callback_Error() {
-  Serial.println("BP_ERROR");
+// รหัส err ที่โมดูลส่งมาคือคำตอบว่า 'ทำไมวัดไม่ผ่าน' (แขนขยับ / ผ้าพันหลวม /
+// ลมรั่ว ฯลฯ) เดิมอ่านออกมาแล้วทิ้ง host จึงบอกผู้ใช้ได้แค่ว่าผิดพลาด
+// ค่าติดลบสงวนไว้ให้เหตุที่ firmware สรุปเอง ไม่ใช่รหัสของโมดูล
+static const int ERRCODE_MODULE_SILENT = -1;  // เงียบไปกลางคัน watchdog ตัดรอบ
+
+void callback_Error(int errCode) {
+  Serial.print("BP_ERROR:");
+  Serial.println(errCode);
+}
+
+// รอบวัดจบแล้วแต่ไม่เคยได้แพ็กเก็ตผล -- คนละเรื่องกับ BP_ERROR
+// (โมดูลไม่ได้แจ้งว่าวัดผิดพลาด) และคนละเรื่องกับเงียบไปเฉย ๆ
+void callback_NoResult() {
+  Serial.println("NO_RESULT");
 }
 
 void callback_Ready() {
@@ -142,6 +154,11 @@ void processBPLine(String line) {
       if (line.indexOf("measuring process") >= 0) {
         if (resultCaptured) {
           callback_Result();
+        } else {
+          // จบรอบวัดโดยไม่เคยได้แพ็กเก็ตผล (RX ล้น/บรรทัดขาด) เดิมตรงนี้
+          // เงียบสนิท host จึงรอจนหมด timeout แล้วรายงานว่า 'ไม่ตอบสนอง'
+          // ทั้งที่ผู้ป่วยโดนรัดแขนครบรอบไปแล้วจริง ๆ
+          callback_NoResult();
         }
         setState(STATE_WAIT_SHUTDOWN);
         break;
@@ -153,7 +170,7 @@ void processBPLine(String line) {
         int errCode = line.substring(idx + 4).toInt();
         if (errCode != 0) {
           measureError = true;
-          callback_Error();
+          callback_Error(errCode);
           setState(STATE_WAIT_SHUTDOWN);
         }
         break;
@@ -230,7 +247,7 @@ void checkStateTimeout() {
   if (currentState == STATE_MEASURING &&
       millis() - stateSince >= MEASURE_TIMEOUT_MS) {
     releaseTrigger();
-    callback_Error();          // การวัดรอบนี้ถือว่าล้มเหลว
+    callback_Error(ERRCODE_MODULE_SILENT);  // การวัดรอบนี้ถือว่าล้มเหลว
     setState(STATE_IDLE);
     return;
   }

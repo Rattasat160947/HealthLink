@@ -683,16 +683,24 @@ _SUBSYSTEM_LABELS = {
 
 
 class CareKeeperWindow(QMainWindow):
-    # How long the NIBP button stays locked after a measurement. A good reading
-    # only needs the cuff to deflate and the arm to recover; a device-reported
-    # BP_ERROR also parks the cuff in a lockout of its own.
+    # How long the NIBP button stays locked after a measurement.
     #
-    # The error cooldown is deliberately SHORTER than that lockout (the
-    # firmware asks for ~2 min). Holding the operator for the full two minutes
-    # costs more than an early retry does: a retry that lands too soon now
-    # comes straight back as NOT_READY with its own message in well under a
-    # second, instead of hanging, so letting them try again at 60 s is cheap.
-    BP_COOLDOWN_AFTER_SUCCESS = 60
+    # The reading reaches this screen the moment the module finishes
+    # measuring -- which is also the moment it begins powering down, and it
+    # needs ~60 s more before it will accept another run. A 60 s cooldown
+    # therefore put the next measurement exactly on that boundary: some
+    # rounds cleared it, some pressed the module's button while it was still
+    # shutting down and came back BP_ERROR or empty. That is the "sometimes
+    # it measures, sometimes it doesn't" operators were reporting. 70 s
+    # keeps ~10 s of margin over the module's own timing without holding
+    # them for the full two minutes.
+    BP_COOLDOWN_AFTER_SUCCESS = 70
+    # The error cooldown is deliberately SHORTER than the cuff's own lockout
+    # (the firmware asks for ~2 min). Holding the operator for the full two
+    # minutes costs more than an early retry does: a retry that lands too
+    # soon comes straight back as NOT_READY with its own message in well
+    # under a second -- connect() asks STATUS before it touches anything --
+    # instead of hanging, so letting them try again at 60 s is cheap.
     BP_COOLDOWN_AFTER_DEVICE_ERROR = 60
 
     def __init__(self, provider: CareKeeperProvider, mode_name: str = "Mock") -> None:
@@ -2325,7 +2333,9 @@ class CareKeeperWindow(QMainWindow):
         # moment rather than letting the operator hammer the button into a
         # device that is not listening. See BP_COOLDOWN_AFTER_DEVICE_ERROR for
         # why that pause is shorter than the lockout itself.
-        if getattr(self.provider, "last_bp_error", None) == "BP_ERROR":
+        # NO_RESULT joins it: the cuff ran a full cycle and only the reading
+        # went missing, so the module is in exactly the same lockout.
+        if getattr(self.provider, "last_bp_error", None) in ("BP_ERROR", "NO_RESULT"):
             self._start_bp_cooldown(self.BP_COOLDOWN_AFTER_DEVICE_ERROR, succeeded=False)
 
     def _start_bp_cooldown(self, seconds: int, *, succeeded: bool) -> None:
