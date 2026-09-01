@@ -403,11 +403,20 @@ class RealCareKeeperProvider(CareKeeperProvider):
     _BP_DEVICE_CODE_MESSAGES: dict[int, str] = {
         # Negative codes are the firmware's own, not the module's.
         -1: "เครื่องวัดความดันหยุดตอบระหว่างวัด รอบวัดถูกตัดอัตโนมัติ กรุณาตรวจสายสัญญาณระหว่างบอร์ดกับเครื่องวัด แล้ววัดใหม่",
-        # Observed 1 Sep 2026. 4 came back from BOTH 'cuff not on an arm'
-        # and 'cuff wrapped loose' -- the module could not build or hold
-        # pressure. The wording covers both, because the code does not
-        # separate them and guessing which one it is helps nobody.
-        4: "ผ้าพันแขนหลวมหรือยังไม่ได้พันแขน กรุณาพันผ้าพันแขนให้แน่นพอดี ให้ขอบล่างอยู่เหนือข้อพับแขนประมาณ 2 ซม. แล้ววัดใหม่",
+        # 4 comes back from every cuff-pressure failure we have been able
+        # to stage: no cuff at all, a cuff wrapped loose, a cuff wrapped
+        # hard, and the air hose pulled off (1 Sep 2026, four runs). It is
+        # the module's "cuff pressure did not behave" code, NOT a
+        # loose-cuff code -- these modules watch how fast pressure rises
+        # against how much they pumped, and too fast fails the same check
+        # as too slow.
+        #
+        # The first wording here said "loose, wrap it tighter", off the
+        # two loose-side runs alone. It then told an operator who had
+        # wrapped the cuff hard to wrap it harder. A code this broad gets
+        # a checklist, not a diagnosis -- do not narrow it again without
+        # a code that actually distinguishes the cases.
+        4: "เครื่องวัดสร้างความดันในผ้าพันแขนไม่ได้ตามปกติ กรุณาตรวจว่าพันแขนไม่หลวมและไม่แน่นเกินไป (สอดนิ้วได้ 1-2 นิ้ว) และสายลมเสียบแน่นไม่พับงอ แล้ววัดใหม่",
         # Observed 1 Sep 2026 from moving the arm mid-run. Worded as "could
         # not read the signal, usually movement" rather than "you moved":
         # one run is enough to know movement produces this code, not enough

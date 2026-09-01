@@ -381,17 +381,21 @@ def test_bp_success_clears_a_code_left_by_an_earlier_failure(provider, monkeypat
 
 
 @pytest.mark.parametrize(
-    "code, expected_phrase",
+    "code, expected_phrases",
     [
-        # Both "no cuff at all" and "cuff wrapped loose" answer 4, so the
-        # message has to cover both rather than pick one.
-        (4, "ผ้าพันแขนหลวมหรือยังไม่ได้พันแขน"),
-        (6, "ขยับแขน"),
+        # 4 answered all four cuff-pressure failures we could stage: no
+        # cuff, loose, wrapped hard, hose off. The message names both
+        # directions and the hose -- an earlier version said only "loose,
+        # wrap it tighter", which sent an operator whose cuff was already
+        # too tight to make it tighter still.
+        (4, ["หลวม", "แน่นเกินไป", "สายลม"]),
+        (6, ["ขยับแขน"]),
     ],
 )
-def test_bp_observed_device_codes_name_the_cause(provider, monkeypatch, code, expected_phrase):
+def test_bp_observed_device_codes_name_the_cause(provider, monkeypatch, code, expected_phrases):
     """Codes 4 and 6 were produced deliberately on the kiosk and logged, so
-    these two say what to fix instead of showing a bare number."""
+    these two say what to check instead of showing a bare number -- without
+    claiming more than the code can actually tell apart."""
     factory = FakeSerialFactory(fail_times=0, lines=[f"BP_ERROR:{code}"])
     monkeypatch.setattr("lib.bp_monitor.serial.Serial", factory)
 
@@ -399,7 +403,8 @@ def test_bp_observed_device_codes_name_the_cause(provider, monkeypatch, code, ex
         provider.measure_blood_pressure()
 
     message = str(excinfo.value)
-    assert expected_phrase in message
+    for phrase in expected_phrases:
+        assert phrase in message
     # A named cause replaces the number; showing both would just be noise.
     assert "รหัสจากเครื่องวัด" not in message
     assert provider.last_bp_error_code == code
