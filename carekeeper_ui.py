@@ -1807,7 +1807,7 @@ class CareKeeperWindow(QMainWindow):
         # operator can bail out of a measurement without finishing it.
         self.btn_back_home_measure = QPushButton("กลับหน้าแรก")
         self.btn_back_home_measure.setObjectName("BtnBack")
-        self.btn_back_home_measure.setFixedSize(210, 50)
+        self.btn_back_home_measure.setFixedSize(190, 50)
         self.btn_back_home_measure.clicked.connect(self._reset_session)
         footer_layout.addWidget(self.btn_back_home_measure)
         # Elides so that, with the back button now sharing the row, a long status
@@ -1820,7 +1820,7 @@ class CareKeeperWindow(QMainWindow):
         footer_layout.addWidget(self.lbl_measure_count, 1)
         self.btn_summary = QPushButton("สรุปผลการวัด  >")
         self.btn_summary.setObjectName("BtnSummaryDisabled")
-        self.btn_summary.setFixedSize(320, 54)
+        self.btn_summary.setFixedSize(260, 54)
         self.btn_summary.setEnabled(False)
         self.btn_summary.clicked.connect(self._show_summary)
         footer_layout.addWidget(self.btn_summary)
