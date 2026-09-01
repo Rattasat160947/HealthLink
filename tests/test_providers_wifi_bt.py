@@ -214,65 +214,6 @@ def test_scan_wifi_networks_rescans_then_returns_all_ssids(provider, monkeypatch
     assert any("--rescan" in c and "yes" in c for c in ran)  # a rescan was forced first
 
 
-def test_connect_bluetooth_retry_and_disable(provider, monkeypatch):
-    calls = {"n": 0}
-
-    def fake_run(*args, **kwargs):
-        calls["n"] += 1
-        if "connect" in args[0] and kwargs.get("check"):
-            raise subprocess.CalledProcessError(1, args[0], output="", stderr="fail")
-        return None
-
-    monkeypatch.setattr(cp.subprocess, "run", fake_run)
-
-    with pytest.raises(RuntimeError):
-        provider.connect_bluetooth("AA:BB:CC:DD:EE:FF")
-    assert SubsystemRegistry.get("bluetooth").disabled is True
-
-
-def test_scan_bluetooth_devices_retry_and_disable(provider, monkeypatch):
-    async def failing_discover(self):
-        raise RuntimeError("no bluetooth adapter")
-
-    monkeypatch.setattr(cp.RealCareKeeperProvider, "_discover_ble_devices", failing_discover)
-
-    with pytest.raises(RuntimeError):
-        provider.scan_bluetooth_devices()
-    assert SubsystemRegistry.get("bluetooth").disabled is True
-
-
-def test_scan_bluetooth_returns_named_devices_sorted_by_signal(provider, monkeypatch):
-    """The picker must show real, in-range devices with the closest (strongest
-    RSSI) first -- not bluetoothctl's stale cache."""
-    async def fake_discover(self):
-        return [
-            ("H59_D105", "AA:BB:CC:DD:EE:01", -70),
-            ("Oximeter", "AA:BB:CC:DD:EE:02", -45),
-        ]
-
-    monkeypatch.setattr(cp.RealCareKeeperProvider, "_discover_ble_devices", fake_discover)
-
-    devices = provider.scan_bluetooth_devices()
-    assert devices == [
-        ("Oximeter", "AA:BB:CC:DD:EE:02"),
-        ("H59_D105", "AA:BB:CC:DD:EE:01"),
-    ]
-    assert SubsystemRegistry.get("bluetooth").disabled is False
-
-
-def test_clean_ble_devices_drops_unnamed_and_dedupes():
-    """Unnamed devices (whose 'name' is just the MAC) are the noise the operator
-    complained about; they must be dropped, and repeat sightings collapsed."""
-    raw = [
-        ("H59_D105", "AA:BB:CC:DD:EE:01", -60),
-        (None, "11:22:33:44:55:66", -40),                 # no name -> drop
-        ("33-44-55-66-77-88", "33:44:55:66:77:88", -30),  # name == MAC -> drop
-        ("H59_D105", "AA:BB:CC:DD:EE:01", -50),           # dup address -> collapse
-    ]
-    cleaned = cp.RealCareKeeperProvider._clean_ble_devices(raw)
-    assert cleaned == [("H59_D105", "AA:BB:CC:DD:EE:01")]
-
-
 def test_wifi_status_check_not_retried(provider, monkeypatch):
     """Regression guard: the 6s-poll status check must never be wrapped in
     retry_with_notify, or it would stall the UI poll for several seconds
@@ -287,19 +228,5 @@ def test_wifi_status_check_not_retried(provider, monkeypatch):
     monkeypatch.setattr(cp.sys, "platform", "linux")
 
     result = provider._is_wifi_connected()
-    assert result is False
-    assert calls["n"] == 1
-
-
-def test_bluetooth_status_check_not_retried(provider, monkeypatch):
-    calls = {"n": 0}
-
-    def fake_check_output(*args, **kwargs):
-        calls["n"] += 1
-        raise subprocess.CalledProcessError(1, args[0])
-
-    monkeypatch.setattr(cp.subprocess, "check_output", fake_check_output)
-
-    result = provider._is_bluetooth_connected()
     assert result is False
     assert calls["n"] == 1

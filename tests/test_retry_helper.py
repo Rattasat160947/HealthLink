@@ -92,7 +92,7 @@ def test_subsystem_registry_is_isolated_per_name():
     with pytest.raises(RuntimeError):
         retry_with_notify(_always_fail(), subsystem="wifi_iso", delay_seconds=0)
     assert SubsystemRegistry.get("wifi_iso").disabled is True
-    assert SubsystemRegistry.get("bluetooth_iso").disabled is False
+    assert SubsystemRegistry.get("network_iso").disabled is False
 
 
 def test_retry_with_notify_async_succeeds_on_second_attempt():

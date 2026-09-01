@@ -30,34 +30,41 @@ def window(qtbot, tmp_path, monkeypatch):
         ("_measure_temperature", "temp", ("lbl_temp_value",)),
     ],
 )
-def test_measurement_starts_inside_value_area_without_popup(window, measure_method, kind, labels):
+def test_measurement_starts_with_expected_feedback(window, measure_method, kind, labels):
     getattr(window, measure_method)()
 
     assert window.measurement_active[kind] is True
     assert all(getattr(window, name).text() == "--" for name in labels)
-    assert not hasattr(window, "spo2_status_card")
+    if kind == "spo2":
+        assert window.spo2_measurement_popup.isHidden() is False
+        assert window.spo2_measurement_popup.timer.isActive() is True
+    elif kind == "temp":
+        assert window.temp_measurement_popup.isHidden() is False
+        assert window.temp_measurement_popup.timer.isActive() is True
 
 
-def test_spo2_real_samples_move_the_visible_number_until_final(window, qtbot):
+def test_spo2_popup_stays_up_for_real_samples_then_final_value_is_kept(window, qtbot):
     window._measure_spo2()
 
     window._on_measurement_progress(
         "spo2", 94, {"bpm": 70, "stable": False, "finger_detected": True}
     )
-    assert window.lbl_spo2_value.text() == "94"
+    assert window.lbl_spo2_value.text() == "--"
+    assert window.spo2_measurement_popup.isHidden() is False
     assert window.vitals.spo2 is None
 
     window._on_measurement_progress(
         "spo2", 98, {"bpm": 72, "stable": False, "finger_detected": True}
     )
-    qtbot.wait(350)
-    assert window.lbl_spo2_value.text() == "98"
+    assert window.lbl_spo2_value.text() == "--"
     assert "รอจนกว่าจะนิ่ง" in window.lbl_system_message.text()
 
     window._on_spo2_done(98)
     assert window.measurement_active["spo2"] is False
     assert window.lbl_spo2_value.text() == "98"
     assert window.vitals.spo2 == 98
+    qtbot.wait(300)
+    assert window.spo2_measurement_popup.isHidden() is True
 
 
 def test_spo2_without_finger_shows_thai_placement_instruction(window):
@@ -67,43 +74,47 @@ def test_spo2_without_finger_shows_thai_placement_instruction(window):
     )
 
     assert window.lbl_spo2_value.text() == "--"
+    assert window.spo2_measurement_popup.message == "วางนิ้วให้แนบเซนเซอร์"
     assert "กรุณาวางนิ้วให้แนบเต็มเซนเซอร์" in window.lbl_system_message.text()
 
 
-def test_temperature_real_samples_move_smoothly_then_settle(window, qtbot):
+def test_temperature_popup_stays_up_for_samples_then_final_value_is_kept(window, qtbot):
     window._measure_temperature()
 
     window._on_measurement_progress(
         "temp", 35.8, {"stable": False, "in_contact": True}
     )
-    assert window.lbl_temp_value.text() == "35.8"
+    assert window.lbl_temp_value.text() == "--"
+    assert window.temp_measurement_popup.isHidden() is False
 
     window._on_measurement_progress(
         "temp", 36.2, {"stable": False, "in_contact": True}
     )
-    qtbot.wait(350)
-    assert window.lbl_temp_value.text() == "36.2"
+    assert window.lbl_temp_value.text() == "--"
 
     window._on_temperature_done(36.2)
     assert window.measurement_active["temp"] is False
     assert window.lbl_temp_value.text() == "36.2"
     assert window.vitals.temperature == 36.2
+    qtbot.wait(300)
+    assert window.temp_measurement_popup.isHidden() is True
 
 
-def test_temperature_waiting_updates_do_not_restart_or_blink(window, qtbot):
+def test_temperature_waiting_updates_keep_popup_visible_without_blinking(window, qtbot):
     window._measure_temperature()
     qtbot.wait(130)
-    first_value = window.lbl_temp_value.text()
-    assert first_value != "--"
+    assert window.lbl_temp_value.text() == "--"
+    assert window.temp_measurement_popup.isHidden() is False
 
     for _ in range(5):
         window._on_measurement_progress(
             "temp", 22.0, {"stable": False, "in_contact": False}
         )
         qtbot.wait(40)
-        assert window.lbl_temp_value.text() != "--"
+        assert window.lbl_temp_value.text() == "--"
+        assert window.temp_measurement_popup.isHidden() is False
 
-    assert window.lbl_temp_value.text() != first_value
+    assert window.temp_measurement_popup.message == "แนบเซนเซอร์กับผิว"
 
 
 def test_remeasurement_clears_previous_value_and_failure_does_not_restore_it(window):
@@ -123,6 +134,7 @@ def test_remeasurement_clears_previous_value_and_failure_does_not_restore_it(win
     assert window.measurement_active["spo2"] is False
     assert window.lbl_spo2_value.text() == "--"
     assert window.vitals.spo2 is None
+    assert window.spo2_measurement_popup.isHidden() is True
 
 
 def test_pressure_animation_finishes_on_actual_device_result(window):
@@ -156,8 +168,8 @@ def test_pressure_numbers_run_for_feedback_and_replace_old_result(window, qtbot)
     window._on_measurement_progress("bp", None, {"started": True})
     qtbot.wait(230)
     assert window.lbl_sys_value.text() == "1"
-    assert window.lbl_dia_value.text() == "1"
-    assert window.lbl_pulse_value.text() == "1"
+    assert window.lbl_dia_value.text() == "--"
+    assert window.lbl_pulse_value.text() == "--"
 
     qtbot.wait(230)
     assert window.lbl_sys_value.text() == "2"
@@ -167,6 +179,28 @@ def test_pressure_numbers_run_for_feedback_and_replace_old_result(window, qtbot)
     assert window.lbl_sys_value.text() == "118"
     assert window.lbl_dia_value.text() == "76"
     assert window.lbl_pulse_value.text() == "69"
+
+
+def test_pressure_sys_sweeps_1_to_160_then_60_and_back_up(window):
+    window._measure_bp()
+    window._on_measurement_progress("bp", None, {"started": True})
+    display = window.bp_sys_live_display
+    display.timer.stop()
+
+    upward = []
+    for _ in range(160):
+        display._tick()
+        upward.append(int(display.current))
+    assert upward == list(range(1, 161))
+
+    downward = []
+    for _ in range(100):
+        display._tick()
+        downward.append(int(display.current))
+    assert downward == list(range(159, 59, -1))
+
+    display._tick()
+    assert display.current == 61
 
 
 def test_reset_stops_live_numbers(window):
@@ -183,10 +217,10 @@ def test_reset_stops_live_numbers(window):
 
     assert not any(window.measurement_active.values())
     assert window.bp_sys_live_display.timer.isActive() is False
-    assert window.bp_dia_live_display.timer.isActive() is False
-    assert window.bp_pulse_live_display.timer.isActive() is False
     assert window.spo2_live_display.timer.isActive() is False
     assert window.temp_live_display.timer.isActive() is False
+    assert window.spo2_measurement_popup.isHidden() is True
+    assert window.temp_measurement_popup.isHidden() is True
 
 
 def test_mock_provider_progress_crosses_worker_thread_to_visible_label(
@@ -201,8 +235,9 @@ def test_mock_provider_progress_crosses_worker_thread_to_visible_label(
     win.queue_worker.join(timeout=2)
 
     win._measure_spo2()
-    qtbot.waitUntil(lambda: win.lbl_spo2_value.text() != "--", timeout=1800)
     assert win.measurement_active["spo2"] is True
+    assert win.spo2_measurement_popup.isHidden() is False
+    assert win.lbl_spo2_value.text() == "--"
 
     qtbot.waitUntil(lambda: win.measurement_active["spo2"] is False, timeout=1800)
     qtbot.waitUntil(

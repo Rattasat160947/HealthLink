@@ -75,12 +75,6 @@ class FakeFailingProvider(CareKeeperProvider):
     def connect_wifi(self, ssid: str, password: str | None = None) -> bool:
         return True
 
-    def scan_bluetooth_devices(self):
-        return []
-
-    def connect_bluetooth(self, address: str) -> bool:
-        return True
-
     def reboot_device(self) -> bool:
         return True
 

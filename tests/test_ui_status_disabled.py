@@ -22,14 +22,22 @@ def window(qtbot, tmp_path, monkeypatch):
 
 
 def test_device_status_disabled_greys_out_wifi_indicator(window):
-    status = DeviceStatus(wifi_connected=True, wifi_disabled=True, bluetooth_connected=True)
+    status = DeviceStatus(wifi_connected=True, wifi_disabled=True)
     window._on_status_done(status)
 
-    wifi_clusters = [w for w in window._status_widgets if w[1] is not None]
+    wifi_clusters = [w for w in window._status_widgets if w[0] is not None]
     assert wifi_clusters  # the welcome header still carries a Wi-Fi indicator
-    for _bt, wifi, _battery, _battery_text, _bt_text, wifi_text in wifi_clusters:
+    for wifi, _battery, _battery_text, wifi_text in wifi_clusters:
         assert wifi.connected is False
         assert wifi_text.text() == "ปิดใช้งาน"
+
+
+def test_battery_indicator_uses_minus_or_lightning_from_charge_status(window):
+    window._on_status_done(DeviceStatus(battery_percent=72, battery_charging=False))
+    assert all(item[1].charging is False for item in window._status_widgets)
+
+    window._on_status_done(DeviceStatus(battery_percent=72, battery_charging=True))
+    assert all(item[1].charging is True for item in window._status_widgets)
 
 
 def test_device_status_disabled_greys_out_bp_button(window):
@@ -74,5 +82,5 @@ def test_status_poll_does_not_block_on_disabled_subsystem(window):
     cheap widget update, not a retry trigger — it must not call back into
     retry_with_notify or otherwise stall."""
     for _ in range(20):
-        window._on_status_done(DeviceStatus(wifi_disabled=True, bluetooth_disabled=True, bp_disabled=True, spo2_disabled=True, idcard_disabled=True))
+        window._on_status_done(DeviceStatus(wifi_disabled=True, bp_disabled=True, spo2_disabled=True, idcard_disabled=True))
     assert SubsystemRegistry.get("wifi").consecutive_failures == 0

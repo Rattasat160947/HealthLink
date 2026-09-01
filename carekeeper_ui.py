@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import getpass
+import math
 import os
 import socket
 import sys
@@ -11,7 +12,16 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QObject, QRectF, QSize, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen, QBrush, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QBrush,
+    QFont,
+    QFontDatabase,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -25,6 +35,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QStackedLayout,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -211,45 +222,25 @@ class WifiIndicator(QWidget):
             start_angle = int((90 - span / 2) * 16)
             painter.drawArc(cx - radius, cy - radius, radius * 2, radius * 2, start_angle, span * 16)
 
-class BluetoothIndicator(QWidget):
-    clicked = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.connected = False
-        self.scale = 1.45
-        self.setFixedSize(int(20 * self.scale), int(20 * self.scale))
-        self.setCursor(Qt.PointingHandCursor)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton:
-            self.clicked.emit()
-
-    def set_connected(self, connected: bool) -> None:
-        self.connected = connected
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.scale(self.scale, self.scale)
-        color = QColor("#75efff") if self.connected else QColor("#7c92a4")
-        painter.setPen(QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawLine(10, 3, 10, 17)
-        painter.drawLine(10, 3, 15, 7)
-        painter.drawLine(15, 7, 5, 14)
-        painter.drawLine(10, 17, 15, 13)
-        painter.drawLine(15, 13, 5, 6)
-
 class BatteryIndicator(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.percent = 0
+        self.charging = False
         self.scale = 1.15
         self.setFixedSize(int(30 * self.scale), int(15 * self.scale))
 
     def set_percent(self, percent: int | None) -> None:
         self.percent = 0 if percent is None else max(0, min(100, percent))
+        self.update()
+
+    def set_charging(self, charging: bool) -> None:
+        self.charging = bool(charging)
+        self.update()
+
+    def set_state(self, percent: int | None, charging: bool) -> None:
+        self.percent = 0 if percent is None else max(0, min(100, percent))
+        self.charging = bool(charging)
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -270,6 +261,152 @@ class BatteryIndicator(QWidget):
         if fill_width:
             painter.setBrush(QBrush(fill))
             painter.drawRoundedRect(3, 3, fill_width, 9, 1.5, 1.5)
+
+        # Draw the state ourselves so the kiosk does not depend on a font
+        # containing a lightning glyph. A minus means the battery is not
+        # charging; the filled zig-zag means charging or fast charging.
+        symbol = QColor("#0b1f33")
+        if self.charging:
+            lightning = QPainterPath()
+            lightning.moveTo(15.5, 2.5)
+            lightning.lineTo(10.5, 8.0)
+            lightning.lineTo(13.5, 8.0)
+            lightning.lineTo(11.5, 12.0)
+            lightning.lineTo(18.0, 6.5)
+            lightning.lineTo(14.5, 6.5)
+            lightning.closeSubpath()
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(symbol))
+            painter.drawPath(lightning)
+        else:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(symbol, 2.0, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(10, 7, 17, 7)
+
+
+class MeasurementAnimationPopup(QWidget):
+    """Small animated, non-modal measurement card drawn without image assets."""
+
+    def __init__(self, kind: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.kind = kind
+        self.accent = QColor("#62e6f4" if kind == "spo2" else "#1bd06b")
+        self.message = "กำลังวัดออกซิเจน" if kind == "spo2" else "กำลังวัดอุณหภูมิ"
+        self.phase = 0.0
+        self.opacity = 1.0
+        self.fading = False
+        self.timer = QTimer(self)
+        self.timer.setInterval(45)
+        self.timer.timeout.connect(self._tick)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.hide()
+
+    def start(self) -> None:
+        self.phase = 0.0
+        self.opacity = 1.0
+        self.fading = False
+        self.show()
+        self.raise_()
+        self.timer.start()
+        self.update()
+
+    def stop(self, *, animated: bool = True) -> None:
+        if animated and not self.isHidden():
+            self.fading = True
+            if not self.timer.isActive():
+                self.timer.start()
+            return
+        self.timer.stop()
+        self.fading = False
+        self.hide()
+
+    def set_message(self, message: str) -> None:
+        if self.message != message:
+            self.message = message
+            self.update()
+
+    def _tick(self) -> None:
+        self.phase = (self.phase + 0.18) % math.tau
+        if self.fading:
+            self.opacity = max(0.0, self.opacity - 0.2)
+            if self.opacity <= 0.0:
+                self.timer.stop()
+                self.fading = False
+                self.hide()
+                return
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setOpacity(self.opacity)
+
+        pulse = (math.sin(self.phase) + 1.0) / 2.0
+        scale = 0.96 + (0.04 * pulse)
+        card_width = max(220.0, min(350.0, self.width() - 12.0))
+        card_height = max(100.0, min(132.0, self.height() - 12.0))
+
+        painter.translate(self.rect().center())
+        painter.scale(scale, scale)
+        card = QRectF(-card_width / 2, -card_height / 2, card_width, card_height)
+
+        border = QColor(self.accent)
+        border.setAlpha(220)
+        painter.setPen(QPen(border, 2.2))
+        painter.setBrush(QBrush(QColor(6, 18, 27, 242)))
+        painter.drawRoundedRect(card, 20, 20)
+
+        icon_x = card.left() + 58
+        icon_y = card.center().y()
+        ring = QColor(self.accent)
+        ring.setAlpha(int(50 + (105 * (1.0 - pulse))))
+        ring_radius = 28 + (8 * pulse)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(ring, 2.0))
+        painter.drawEllipse(
+            QRectF(icon_x - ring_radius, icon_y - ring_radius, ring_radius * 2, ring_radius * 2)
+        )
+
+        if self.kind == "spo2":
+            # A rounded fingertip with a sensor point and breathing ring.
+            finger = QRectF(icon_x - 12, icon_y - 25, 24, 50)
+            painter.setPen(QPen(self.accent, 3.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(QBrush(QColor(98, 230, 244, 28)))
+            painter.drawRoundedRect(finger, 12, 12)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(self.accent))
+            painter.drawEllipse(QRectF(icon_x - 4, icon_y - 12, 8, 8))
+        else:
+            # Thermometer level rises and falls gently while the sensor reads.
+            top = icon_y - 26
+            bottom = icon_y + 14
+            level = bottom - (18 + (12 * pulse))
+            painter.setPen(QPen(QColor("#d8ffe8"), 3.0, Qt.SolidLine, Qt.RoundCap))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(icon_x - 7, top, 14, 43), 7, 7)
+            painter.drawEllipse(QRectF(icon_x - 13, icon_y + 8, 26, 26))
+            painter.setPen(QPen(self.accent, 6.0, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(int(icon_x), int(level), int(icon_x), int(bottom + 6))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(self.accent))
+            painter.drawEllipse(QRectF(icon_x - 8, icon_y + 13, 16, 16))
+
+        text_rect = QRectF(
+            card.left() + 102,
+            card.top() + 18,
+            card.width() - 118,
+            card.height() - 36,
+        )
+        font = QFont(self.font())
+        font.setPixelSize(20)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#f8fafc"))
+        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, self.message)
 
 class PowerButton(QWidget):
     """Hand-drawn power icon (avoids relying on a font glyph that may render as a box)."""
@@ -439,18 +576,31 @@ class LiveNumberDisplay(QObject):
         self.busy_values: tuple[float, ...] = ()
         self.busy_index = 0
         self.busy_direction = 1
+        self.busy_repeat_floor = 0
+        self.busy_has_peaked = False
         self.transition_step = 1.0 if decimals == 0 else 0.1
         self.timer = QTimer(self)
         self.timer.setInterval(70)
         self.timer.timeout.connect(self._tick)
 
-    def begin_busy(self, values: tuple[float, ...], interval_ms: int = 180) -> None:
+    def begin_busy(
+        self,
+        values: tuple[float, ...],
+        interval_ms: int = 180,
+        repeat_floor: float | None = None,
+    ) -> None:
         self.timer.stop()
         self.current = None
         self.target = None
         self.busy_values = values
         self.busy_index = 0
         self.busy_direction = 1
+        self.busy_has_peaked = False
+        self.busy_repeat_floor = 0
+        if repeat_floor is not None and values:
+            self.busy_repeat_floor = min(
+                range(len(values)), key=lambda index: abs(values[index] - repeat_floor)
+            )
         self.label.setText("--")
         self.timer.setInterval(interval_ms)
         self.timer.start()
@@ -494,10 +644,12 @@ class LiveNumberDisplay(QObject):
             next_index = self.busy_index + self.busy_direction
             if next_index >= len(self.busy_values):
                 self.busy_direction = -1
+                self.busy_has_peaked = True
                 next_index = max(0, len(self.busy_values) - 2)
-            elif next_index < 0:
+            elif next_index < (self.busy_repeat_floor if self.busy_has_peaked else 0):
                 self.busy_direction = 1
-                next_index = 1 if len(self.busy_values) > 1 else 0
+                floor = self.busy_repeat_floor if self.busy_has_peaked else 0
+                next_index = floor + 1 if len(self.busy_values) > floor + 1 else floor
             self.busy_index = next_index
             self._render()
             return
@@ -524,7 +676,6 @@ class LiveNumberDisplay(QObject):
 
 _SUBSYSTEM_LABELS = {
     "wifi": "Wi-Fi",
-    "bluetooth": "Bluetooth",
     "bp_monitor": "เครื่องวัดความดัน",
     "spo2": "เครื่องวัดออกซิเจน",
     "idcard": "เครื่องอ่านบัตร",
@@ -625,8 +776,6 @@ class CareKeeperWindow(QMainWindow):
 
     def _build_live_value_displays(self) -> None:
         self.bp_sys_live_display = LiveNumberDisplay(self.lbl_sys_value, 0, self)
-        self.bp_dia_live_display = LiveNumberDisplay(self.lbl_dia_value, 0, self)
-        self.bp_pulse_live_display = LiveNumberDisplay(self.lbl_pulse_value, 0, self)
         self.spo2_live_display = LiveNumberDisplay(self.lbl_spo2_value, 0, self)
         self.temp_live_display = LiveNumberDisplay(self.lbl_temp_value, 1, self)
 
@@ -634,10 +783,13 @@ class CareKeeperWindow(QMainWindow):
         self._clear_measurement_value(kind)
         self.measurement_active[kind] = True
         if kind == "spo2":
-            self.spo2_live_display.begin_busy(tuple(range(1, 101)), interval_ms=120)
+            self.spo2_live_display.stop()
+            self.spo2_measurement_popup.set_message("กำลังวัดออกซิเจน")
+            self.spo2_measurement_popup.start()
         elif kind == "temp":
-            temp_sweep = tuple(value / 10 for value in range(10, 431, 2))
-            self.temp_live_display.begin_busy(temp_sweep, interval_ms=100)
+            self.temp_live_display.stop()
+            self.temp_measurement_popup.set_message("กำลังวัดอุณหภูมิ")
+            self.temp_measurement_popup.start()
 
     def _clear_measurement_value(self, kind: str) -> None:
         if kind == "bp":
@@ -664,26 +816,28 @@ class CareKeeperWindow(QMainWindow):
         self.measurement_active[kind] = False
         if kind == "bp" and isinstance(value, BloodPressureReading):
             self.bp_sys_live_display.finish(value.systolic)
-            self.bp_dia_live_display.finish(value.diastolic)
-            self.bp_pulse_live_display.finish(value.pulse)
+            self.lbl_dia_value.setText(str(value.diastolic))
+            self.lbl_pulse_value.setText(str(value.pulse))
         elif kind == "spo2" and value is not None:
+            self.spo2_measurement_popup.stop()
             self.spo2_live_display.finish(float(value))
         elif kind == "temp" and value is not None:
+            self.temp_measurement_popup.stop()
             self.temp_live_display.finish(float(value))
 
     def _cancel_measurement_display(self, kind: str) -> None:
         self.measurement_active[kind] = False
         if kind == "bp":
             self.bp_sys_live_display.stop()
-            self.bp_dia_live_display.stop()
-            self.bp_pulse_live_display.stop()
             self.lbl_sys_value.setText("--")
             self.lbl_dia_value.setText("--")
             self.lbl_pulse_value.setText("--")
         elif kind == "spo2":
+            self.spo2_measurement_popup.stop(animated=False)
             self.spo2_live_display.stop()
             self.lbl_spo2_value.setText("--")
         elif kind == "temp":
+            self.temp_measurement_popup.stop(animated=False)
             self.temp_live_display.stop()
             self.lbl_temp_value.setText("--")
 
@@ -694,23 +848,26 @@ class CareKeeperWindow(QMainWindow):
         details = state if isinstance(state, dict) else {}
         if kind == "bp" and details.get("started"):
             if not self.bp_sys_live_display.timer.isActive():
-                self.bp_sys_live_display.begin_busy(tuple(range(1, 181)), interval_ms=180)
-                self.bp_dia_live_display.begin_busy(tuple(range(1, 111)), interval_ms=180)
-                self.bp_pulse_live_display.begin_busy(tuple(range(1, 101)), interval_ms=180)
+                self.bp_sys_live_display.begin_busy(
+                    tuple(range(1, 161)), interval_ms=180, repeat_floor=60
+                )
             self._set_system_message("เครื่องเริ่มวัดความดันแล้ว กรุณาอยู่นิ่ง", success=None)
         elif kind == "spo2":
             if not details.get("finger_detected", True):
+                self.spo2_measurement_popup.set_message("วางนิ้วให้แนบเซนเซอร์")
                 self._set_system_message("กรุณาวางนิ้วให้แนบเต็มเซนเซอร์", success=None)
             elif value is None:
+                self.spo2_measurement_popup.set_message("กำลังอ่านสัญญาณ")
                 self._set_system_message("กำลังอ่านสัญญาณ กรุณาวางนิ่งไว้", success=None)
             else:
-                self.spo2_live_display.set_target(float(value))
+                self.spo2_measurement_popup.set_message("กำลังวัดออกซิเจน")
                 self._set_system_message("ค่ากำลังเปลี่ยน กรุณารอจนกว่าจะนิ่ง", success=None)
         elif kind == "temp":
             if not details.get("in_contact", True):
+                self.temp_measurement_popup.set_message("แนบเซนเซอร์กับผิว")
                 self._set_system_message("กรุณาแนบเซนเซอร์กับผิวให้สนิท", success=None)
             elif value is not None:
-                self.temp_live_display.set_target(float(value))
+                self.temp_measurement_popup.set_message("กำลังวัดอุณหภูมิ")
                 self._set_system_message("ค่ากำลังเปลี่ยน กรุณารอจนกว่าจะนิ่ง", success=None)
 
     def _show_popup(self, message: str, success: bool = True, duration_ms: int = 2200) -> None:
@@ -1198,50 +1355,12 @@ class CareKeeperWindow(QMainWindow):
             self._on_wifi_action_failed,
         )
 
-    def _open_bluetooth_selector(self) -> None:
-        if self.network_task and self.network_task.isRunning():
-            self._show_toast("กำลังสแกนหรือเชื่อมต่ออุปกรณ์อยู่", success=False, duration_ms=1800)
-            return
-        if SubsystemRegistry.get("bluetooth").disabled:
-            SubsystemRegistry.get("bluetooth").enable()
-            self._show_toast("กำลังลองเชื่อมต่อ Bluetooth ใหม่...", success=True, duration_ms=1500)
-        self._show_toast("กำลังสแกน Bluetooth...", success=True, duration_ms=1200)
-        self._start_network_task(
-            self.provider.scan_bluetooth_devices,
-            self._on_bluetooth_scan_done,
-            self._on_bluetooth_action_failed,
-        )
-
-    def _on_bluetooth_scan_done(self, result: object) -> None:
-        self.network_task = None
-        devices = list(result) if isinstance(result, list) else []
-        if not devices:
-            self._show_toast("ไม่พบ Bluetooth device ที่เลือกได้", success=False)
-            return
-
-        labels = [f"{name} ({address})" for name, address in devices]
-        selected, ok = self._select_from_list("เลือก Bluetooth", "Bluetooth device:", labels)
-        if not ok or not selected:
-            return
-
-        index = labels.index(selected)
-        address = devices[index][1]
-        self._show_toast(f"กำลังเชื่อมต่อ Bluetooth: {address}", success=True, duration_ms=1200)
-        self._start_network_task(
-            lambda: self.provider.connect_bluetooth(address),
-            lambda result: self._on_network_connected("เชื่อมต่อ Bluetooth สำเร็จ"),
-            self._on_bluetooth_action_failed,
-        )
-
     def _on_network_connected(self, message: str) -> None:
         self._show_toast(message, success=True)
         self._request_device_status()
 
     def _on_wifi_action_failed(self, message: str) -> None:
         self._show_toast(f"Wi-Fi: {message}", success=False, duration_ms=3000)
-
-    def _on_bluetooth_action_failed(self, message: str) -> None:
-        self._show_toast(f"Bluetooth: {message}", success=False, duration_ms=3000)
 
     def _on_retry_attempt(self, subsystem: str, attempt: int, max_attempts: int) -> None:
         label = _SUBSYSTEM_LABELS.get(subsystem, subsystem)
@@ -1316,27 +1435,14 @@ class CareKeeperWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        bt = BluetoothIndicator()
         wifi = WifiIndicator()
         battery = BatteryIndicator()
         battery_text = QLabel("0%")
         battery_text.setObjectName("ConsoleBatteryLabel")
-        bt_text = QLabel("OFF")
-        bt_text.setObjectName("StatusText")
         wifi_text = QLabel("OFF")
         wifi_text.setObjectName("StatusText")
 
         wifi.clicked.connect(self._open_wifi_selector)
-        bt.clicked.connect(self._open_bluetooth_selector)
-
-        bt_card = QFrame()
-        bt_card.setObjectName("StatusPill")
-        bt_card.setFixedSize(116, 42)
-        bt_layout = QHBoxLayout(bt_card)
-        bt_layout.setContentsMargins(8, 4, 10, 4)
-        bt_layout.setSpacing(4)
-        bt_layout.addWidget(bt, alignment=Qt.AlignCenter)
-        bt_layout.addWidget(bt_text, alignment=Qt.AlignCenter)
 
         wifi_card = QFrame()
         wifi_card.setObjectName("StatusPill")
@@ -1356,21 +1462,18 @@ class CareKeeperWindow(QMainWindow):
         battery_layout.addWidget(battery, alignment=Qt.AlignCenter)
         battery_layout.addWidget(battery_text, alignment=Qt.AlignCenter)
 
-        layout.addWidget(bt_card)
         layout.addWidget(wifi_card)
         layout.addWidget(battery_card)
 
         if not hasattr(self, "_status_widgets"):
             self._status_widgets = []
-        self._status_widgets.append((bt, wifi, battery, battery_text, bt_text, wifi_text))
+        self._status_widgets.append((wifi, battery, battery_text, wifi_text))
 
         if welcome:
-            self.bt_ind_welcome = bt
             self.wifi_ind_welcome = wifi
             self.bat_ind_welcome = battery
             self.lbl_bat_welcome = battery_text
         else:
-            self.bluetooth_indicator = bt
             self.wifi_indicator = wifi
             self.battery_indicator = battery
             self.lbl_battery_text = battery_text
@@ -1382,21 +1485,14 @@ class CareKeeperWindow(QMainWindow):
             return
         self.status_fail_count = 0
 
-        for bt, wifi, battery, battery_text, bt_text, wifi_text in getattr(self, "_status_widgets", []):
+        for wifi, battery, battery_text, wifi_text in getattr(self, "_status_widgets", []):
             battery_text.setText("--%" if result.battery_percent is None else f"{result.battery_percent}%")
-            battery.set_percent(result.battery_percent)
-            # Wi-Fi/Bluetooth are absent on the measure and summary headers.
+            battery.set_state(result.battery_percent, result.battery_charging)
             if wifi is not None:
                 wifi.set_connected(result.wifi_connected and not result.wifi_disabled)
                 wifi_text.setText(
                     "ปิดใช้งาน" if result.wifi_disabled
                     else ("ON" if result.wifi_connected else "OFF")
-                )
-            if bt is not None:
-                bt.set_connected(result.bluetooth_connected and not result.bluetooth_disabled)
-                bt_text.setText(
-                    "ปิดใช้งาน" if result.bluetooth_disabled
-                    else ("CONNECTED" if result.bluetooth_connected else "OFF")
                 )
 
         if hasattr(self, "btn_bp") and self.bp_cooldown_seconds == 0:
@@ -1477,7 +1573,7 @@ class CareKeeperWindow(QMainWindow):
         self.stack.setCurrentIndex(1)
 
     def _refresh_patient(self) -> None:
-        # Thai name only. The status cluster (Bluetooth/Wi-Fi/battery) is back on
+        # Thai name only. The status cluster (Wi-Fi/battery) is back on
         # the measure and summary headers, so the English name is dropped to keep
         # row 1 from overrunning the cluster on the 1024px screen.
         display_name = self.patient.th_name
@@ -1658,7 +1754,7 @@ class CareKeeperWindow(QMainWindow):
         manual_layout.addSpacing(18)
         manual_layout.addLayout(manual_actions)
 
-        # A real top-level dialog (like the Wi-Fi/Bluetooth prompts) so the
+        # A real top-level dialog (like the Wi-Fi prompt) so the
         # touchscreen on-screen keyboard auto-shows; an inline embedded field
         # in the main window never gets the focus event the keyboard watches for.
         self.manual_cid_dialog = QDialog(self)
@@ -1741,7 +1837,9 @@ class CareKeeperWindow(QMainWindow):
         spo2_layout = QHBoxLayout(spo2_row)
         spo2_layout.setContentsMargins(22, 10, 0, 0)
         spo2_layout.setSpacing(0)
-        spo2_box = QVBoxLayout()
+        spo2_content = QWidget()
+        spo2_box = QVBoxLayout(spo2_content)
+        spo2_box.setContentsMargins(0, 0, 0, 0)
         spo2_box.setSpacing(4)
         spo2_box.addWidget(self._console_label("SPO2", "SectionTitleBlue"))
         spo2_value_row = QHBoxLayout()
@@ -1756,7 +1854,14 @@ class CareKeeperWindow(QMainWindow):
         spo2_value_row.addStretch()
         spo2_box.addLayout(spo2_value_row)
         spo2_box.addStretch(1)
-        spo2_layout.addLayout(spo2_box, 1)
+        spo2_area = QWidget()
+        spo2_stack = QStackedLayout(spo2_area)
+        spo2_stack.setContentsMargins(0, 0, 0, 0)
+        spo2_stack.setStackingMode(QStackedLayout.StackAll)
+        spo2_stack.addWidget(spo2_content)
+        self.spo2_measurement_popup = MeasurementAnimationPopup("spo2")
+        spo2_stack.addWidget(self.spo2_measurement_popup)
+        spo2_layout.addWidget(spo2_area, 1)
         self.btn_spo2 = QPushButton("เริ่มวัดค่า\nออกซิเจน")
         self.btn_spo2.setObjectName("BtnSpO2Console")
         self.btn_spo2.setFixedWidth(112)
@@ -1770,7 +1875,9 @@ class CareKeeperWindow(QMainWindow):
         temp_layout = QHBoxLayout(temp_row)
         temp_layout.setContentsMargins(22, 10, 0, 0)
         temp_layout.setSpacing(0)
-        temp_box = QVBoxLayout()
+        temp_content = QWidget()
+        temp_box = QVBoxLayout(temp_content)
+        temp_box.setContentsMargins(0, 0, 0, 0)
         temp_box.setSpacing(4)
         temp_box.addWidget(self._console_label("TEMP", "SectionTitleGreen"))
         temp_value_row = QHBoxLayout()
@@ -1785,7 +1892,14 @@ class CareKeeperWindow(QMainWindow):
         temp_value_row.addStretch()
         temp_box.addLayout(temp_value_row)
         temp_box.addStretch(1)
-        temp_layout.addLayout(temp_box, 1)
+        temp_area = QWidget()
+        temp_stack = QStackedLayout(temp_area)
+        temp_stack.setContentsMargins(0, 0, 0, 0)
+        temp_stack.setStackingMode(QStackedLayout.StackAll)
+        temp_stack.addWidget(temp_content)
+        self.temp_measurement_popup = MeasurementAnimationPopup("temp")
+        temp_stack.addWidget(self.temp_measurement_popup)
+        temp_layout.addWidget(temp_area, 1)
         self.btn_temp = QPushButton("เริ่มวัดค่า\nอุณหภูมิ")
         self.btn_temp.setObjectName("BtnTempConsole")
         self.btn_temp.setFixedWidth(112)
@@ -2262,10 +2376,10 @@ class CareKeeperWindow(QMainWindow):
         for kind in self.measurement_active:
             self.measurement_active[kind] = False
         self.bp_sys_live_display.stop()
-        self.bp_dia_live_display.stop()
-        self.bp_pulse_live_display.stop()
         self.spo2_live_display.stop()
         self.temp_live_display.stop()
+        self.spo2_measurement_popup.stop(animated=False)
+        self.temp_measurement_popup.stop(animated=False)
         self.patient = PatientInfo()
         self.vitals = VitalState()
         self.bp_cooldown_seconds = 0

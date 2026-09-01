@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import asyncio
 import os
 import random
 import re
@@ -14,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from carekeeper_retry import retry_with_notify, retry_with_notify_async, SubsystemRegistry
+from carekeeper_retry import retry_with_notify, SubsystemRegistry
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -34,8 +33,6 @@ def _env(name: str, default: str = "") -> str:
 
 # Keep hardware/backend values in .env instead of editing this file.
 TEST_BP_PORT = _env("CAREKEEPER_BP_PORT")
-TEST_H59_DEVICE_NAME = _env("CAREKEEPER_H59_DEVICE_NAME")
-TEST_H59_DEVICE_ADDRESS = _env("CAREKEEPER_H59_DEVICE_ADDRESS")
 # POST: บันทึกผลวัด
 TEST_API_URL = _env("CAREKEEPER_API_URL")
 TEST_API_KEY_HEADER = _env("CAREKEEPER_API_KEY_HEADER")
@@ -97,10 +94,9 @@ class BloodPressureReading:
 @dataclass
 class DeviceStatus:
     battery_percent: int | None = 100
+    battery_charging: bool = False
     wifi_connected: bool = False
-    bluetooth_connected: bool = False
     wifi_disabled: bool = False
-    bluetooth_disabled: bool = False
     bp_disabled: bool = False
     spo2_disabled: bool = False
     idcard_disabled: bool = False
@@ -153,12 +149,6 @@ class CareKeeperProvider:
         return []
 
     def connect_wifi(self, ssid: str, password: str | None = None) -> bool:
-        raise NotImplementedError
-
-    def scan_bluetooth_devices(self) -> list[tuple[str, str]]:
-        return []
-
-    def connect_bluetooth(self, address: str) -> bool:
         raise NotImplementedError
 
     def reboot_device(self) -> bool:
@@ -228,10 +218,9 @@ class MockCareKeeperProvider(CareKeeperProvider):
         self._battery_percent = max(10, self._battery_percent - random.choice([0, 0, 1]))
         return DeviceStatus(
             battery_percent=self._battery_percent,
+            battery_charging=False,
             wifi_connected=True,
-            bluetooth_connected=True,
             wifi_disabled=_subsystem_disabled("wifi"),
-            bluetooth_disabled=_subsystem_disabled("bluetooth"),
             bp_disabled=_subsystem_disabled("bp_monitor"),
             spo2_disabled=_subsystem_disabled("spo2"),
             idcard_disabled=_subsystem_disabled("idcard"),
@@ -260,14 +249,6 @@ class MockCareKeeperProvider(CareKeeperProvider):
         print(f"[Mock Wi-Fi] connect to {ssid}")
         return True
 
-    def scan_bluetooth_devices(self) -> list[tuple[str, str]]:
-        time.sleep(0.5)
-        return [("H59_D105", TEST_H59_DEVICE_ADDRESS), ("Demo Oximeter", "AA:BB:CC:DD:EE:FF")]
-
-    def connect_bluetooth(self, address: str) -> bool:
-        print(f"[Mock Bluetooth] connect to {address}")
-        return True
-
     def reboot_device(self) -> bool:
         print("[Mock] Reboot device")
         return True
@@ -290,15 +271,11 @@ class RealCareKeeperProvider(CareKeeperProvider):
     def __init__(
         self,
         bp_port: str | None = None,
-        h59_device_name: str | None = None,
-        h59_device_address: str | None = None,
         api_url: str | None = None,
         history_api_url: str | None = None,
     ) -> None:
         self.device_mac = read_device_mac()
         self.bp_port = bp_port or TEST_BP_PORT
-        self.h59_device_name = h59_device_name or TEST_H59_DEVICE_NAME
-        self.h59_device_address = h59_device_address or TEST_H59_DEVICE_ADDRESS
         self.api_url = api_url or TEST_API_URL
         self.history_api_url = history_api_url or TEST_HISTORY_API_URL
         # Why the last blood-pressure measurement came back empty (a
@@ -474,8 +451,8 @@ class RealCareKeeperProvider(CareKeeperProvider):
     }
 
     def measure_spo2(self) -> int:
-        # SpO2 now comes from a MAX30102 (I2C), replacing the old H59 Bluetooth
-        # oximeter. Only OPENING the sensor is retried/disabled (a real hardware
+        # SpO2 comes from a MAX30102 over I2C. Only OPENING the sensor is
+        # retried/disabled (a real hardware
         # fault); the read then polls until the reading settles, so a
         # finger-not-placed timeout doesn't disable the subsystem. Mirrors the
         # BP monitor's connect-vs-measure split.
@@ -560,12 +537,12 @@ class RealCareKeeperProvider(CareKeeperProvider):
         return float(result)
 
     def get_device_status(self) -> DeviceStatus:
+        battery_percent, battery_charging = self._read_battery_state()
         return DeviceStatus(
-            battery_percent=self._read_battery_percent(),
+            battery_percent=battery_percent,
+            battery_charging=battery_charging,
             wifi_connected=self._is_wifi_connected(),
-            bluetooth_connected=self._is_bluetooth_connected(),
             wifi_disabled=_subsystem_disabled("wifi"),
-            bluetooth_disabled=_subsystem_disabled("bluetooth"),
             bp_disabled=_subsystem_disabled("bp_monitor"),
             spo2_disabled=_subsystem_disabled("spo2"),
             idcard_disabled=_subsystem_disabled("idcard"),
@@ -635,19 +612,25 @@ class RealCareKeeperProvider(CareKeeperProvider):
     # bus would print the same line forever; keep the first reason only.
     _battery_error_logged = False
 
-    def _read_battery_percent(self) -> int | None:
+    def _read_battery_state(self) -> tuple[int | None, bool]:
         try:
             from lib.ups import UPSHat
 
-            return int(UPSHat().get_battery_percent())
+            ups = UPSHat()
+            percent = int(ups.get_battery_percent())
+            charging = ups.get_status() in {
+                UPSHat.STATUS_CHARGING,
+                UPSHat.STATUS_FAST_CHARGING,
+            }
+            return percent, charging
         except Exception as e:
-            # The GUI can only show "--%", which does not say whether the HAT
-            # is missing, I2C is off, or the smbus module never imported --
-            # three different fixes. Say which, once, on the console.
+            # The GUI can only show "--%" and the not-charging mark, which does
+            # not say whether the HAT is missing, I2C is off, or smbus failed to
+            # import. Print the real reason once without flooding every poll.
             if not self._battery_error_logged:
                 self._battery_error_logged = True
-                print(f"[Battery] read failed, showing '--': {type(e).__name__}: {e}")
-            return None
+                print(f"[Battery] read failed, showing '--%': {type(e).__name__}: {e}")
+            return None, False
 
     def _is_wifi_connected(self) -> bool:
         if sys.platform == "win32":
@@ -669,18 +652,6 @@ class RealCareKeeperProvider(CareKeeperProvider):
         except Exception:
             return False
 
-    def _is_bluetooth_connected(self) -> bool:
-        try:
-            output = subprocess.check_output(
-                ["bluetoothctl", "devices", "Connected"],
-                text=True,
-                errors="ignore",
-                timeout=4,
-            )
-            return bool(output.strip())
-        except Exception:
-            return False
-        
     def send_data(self, payload: dict) -> bool:
         if not self.api_url:
             raise RuntimeError("ยังไม่ได้ตั้งค่า CAREKEEPER_API_URL สำหรับ backend")
@@ -861,99 +832,6 @@ class RealCareKeeperProvider(CareKeeperProvider):
     @staticmethod
     def _nmcli_error_message(exc: subprocess.CalledProcessError) -> str:
         return (exc.stderr or "").strip() or (exc.stdout or "").strip() or str(exc)
-
-    def toggle_bluetooth(self) -> None:
-        current_state = self._is_bluetooth_connected()
-        cmd = "power off" if current_state else "power on"
-        try:
-            subprocess.run(["bluetoothctl", cmd.split()[0], cmd.split()[1]], check=True, timeout=6)
-        except Exception as e:
-            print(f"Failed to toggle Bluetooth: {e}")
-
-    def scan_bluetooth_devices(self) -> list[tuple[str, str]]:
-        return retry_with_notify(
-            self._scan_bluetooth_devices_once,
-            subsystem="bluetooth",
-            on_attempt=lambda a, m: self._notify_attempt("bluetooth", a, m),
-            on_give_up=lambda r: self._notify_giveup("bluetooth", r),
-        )
-
-    def _scan_bluetooth_devices_once(self) -> list[tuple[str, str]]:
-        try:
-            raw = asyncio.run(self._discover_ble_devices())
-        except Exception as e:
-            raise RuntimeError(f"ไม่สามารถสแกน Bluetooth ได้: {e}")
-        return self._clean_ble_devices(raw)
-
-    async def _discover_ble_devices(self) -> list[tuple[str | None, str | None, int | None]]:
-        """Scan for BLE devices with bleak -- the same stack the H59 reader uses.
-
-        `bluetoothctl devices` lists the adapter's entire ever-seen cache and
-        renders unnamed devices as a bare MAC, which is why the picker showed
-        ~10 stale/unidentifiable signals when only a couple were actually
-        nearby. `BleakScanner.discover` returns only devices advertising during
-        this window, each with its advertised name and RSSI."""
-        from bleak import BleakScanner
-
-        found = await BleakScanner.discover(timeout=8.0, return_adv=True)
-        return [
-            ((adv.local_name or device.name), device.address, adv.rssi)
-            for device, adv in found.values()
-        ]
-
-    @staticmethod
-    def _clean_ble_devices(
-        raw: list[tuple[str | None, str | None, int | None]]
-    ) -> list[tuple[str, str]]:
-        """Turn raw scan results into a clean (name, address) picklist.
-
-        Drops devices with no advertised name -- their label would just be the
-        MAC address, which the operator can't identify and is exactly the noise
-        being complained about -- then orders by signal strength so the
-        physically closest device comes first. De-dupes by address."""
-        by_strength: list[tuple[int, str, str]] = []
-        for name, address, rssi in raw:
-            name = (name or "").strip()
-            address = (address or "").strip()
-            if not address:
-                continue
-            # An unnamed device reports its MAC as the "name" (colon- or
-            # dash-separated). Treat that as no name and skip it.
-            if not name or name.replace("-", ":").upper() == address.upper():
-                continue
-            by_strength.append((rssi if rssi is not None else -999, name, address))
-
-        by_strength.sort(key=lambda t: t[0], reverse=True)  # strongest first
-
-        seen: set[str] = set()
-        devices: list[tuple[str, str]] = []
-        for _rssi, name, address in by_strength:
-            key = address.upper()
-            if key not in seen:
-                seen.add(key)
-                devices.append((name, address))
-        return devices
-
-    def connect_bluetooth(self, address: str) -> bool:
-        return retry_with_notify(
-            lambda: self._connect_bluetooth_once(address),
-            subsystem="bluetooth",
-            on_attempt=lambda a, m: self._notify_attempt("bluetooth", a, m),
-            on_give_up=lambda r: self._notify_giveup("bluetooth", r),
-        )
-
-    def _connect_bluetooth_once(self, address: str) -> bool:
-        try:
-            subprocess.run(["bluetoothctl", "pair", address], timeout=15, capture_output=True, text=True)
-            subprocess.run(["bluetoothctl", "trust", address], timeout=10, capture_output=True, text=True)
-            subprocess.run(["bluetoothctl", "connect", address], timeout=15, check=True, capture_output=True, text=True)
-            self.h59_device_address = address
-            return True
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("เชื่อมต่อ Bluetooth ใช้เวลานานเกินไป")
-        except subprocess.CalledProcessError as e:
-            message = e.stderr.strip() or e.stdout.strip() or str(e)
-            raise RuntimeError(f"เชื่อมต่อ Bluetooth ไม่สำเร็จ: {message}")
 
     def reboot_device(self) -> bool:
         try:
