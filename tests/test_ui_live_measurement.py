@@ -90,10 +90,14 @@ def test_temperature_real_samples_move_smoothly_then_settle(window, qtbot):
     assert window.vitals.temperature == 36.2
 
 
-def test_failed_live_measurement_restores_the_previous_final_value(window):
+def test_remeasurement_clears_previous_value_and_failure_does_not_restore_it(window):
     window.vitals.spo2 = 97
     window._refresh_values()
     window._measure_spo2()
+    assert window.vitals.spo2 is None
+    assert window.lbl_spo2_value.text() == "--"
+    assert window.sum_spo2_value.text() == "--"
+
     window._on_measurement_progress(
         "spo2", 92, {"stable": False, "finger_detected": True}
     )
@@ -101,10 +105,11 @@ def test_failed_live_measurement_restores_the_previous_final_value(window):
     window._on_spo2_failed("อ่านค่าไม่สำเร็จ")
 
     assert window.measurement_active["spo2"] is False
-    assert window.lbl_spo2_value.text() == "97"
+    assert window.lbl_spo2_value.text() == "--"
+    assert window.vitals.spo2 is None
 
 
-def test_pressure_uses_only_the_final_value_because_device_has_no_live_samples(window):
+def test_pressure_animation_finishes_on_actual_device_result(window):
     window._measure_bp()
     assert window.lbl_sys_value.text() == "--"
 
@@ -114,6 +119,33 @@ def test_pressure_uses_only_the_final_value_because_device_has_no_live_samples(w
     assert window.lbl_sys_value.text() == "120"
     assert window.lbl_dia_value.text() == "80"
     assert window.lbl_pulse_value.text() == "70"
+
+
+def test_pressure_numbers_run_for_feedback_and_replace_old_result(window, qtbot):
+    window.vitals.systolic = 130
+    window.vitals.diastolic = 90
+    window.vitals.pulse = 82
+    window._refresh_values()
+
+    window._measure_bp()
+    assert window.vitals.systolic is None
+    assert window.vitals.diastolic is None
+    assert window.vitals.pulse is None
+    assert window.lbl_sys_value.text() == "--"
+    assert window.sum_bp_value.text() == "--/--"
+
+    qtbot.wait(180)
+    assert window.lbl_sys_value.text() == "88"
+    assert window.lbl_dia_value.text() == "54"
+    assert window.lbl_pulse_value.text() == "64"
+
+    qtbot.wait(180)
+    assert window.lbl_sys_value.text() != "88"
+
+    window._on_bp_done(BloodPressureReading(118, 76, 69))
+    assert window.lbl_sys_value.text() == "118"
+    assert window.lbl_dia_value.text() == "76"
+    assert window.lbl_pulse_value.text() == "69"
 
 
 def test_reset_stops_live_numbers(window):
@@ -129,6 +161,9 @@ def test_reset_stops_live_numbers(window):
     window._reset_session()
 
     assert not any(window.measurement_active.values())
+    assert window.bp_sys_live_display.timer.isActive() is False
+    assert window.bp_dia_live_display.timer.isActive() is False
+    assert window.bp_pulse_live_display.timer.isActive() is False
     assert window.spo2_live_display.timer.isActive() is False
     assert window.temp_live_display.timer.isActive() is False
 

@@ -428,7 +428,7 @@ class PopupOverlay(QWidget):
 
 
 class LiveNumberDisplay(QObject):
-    """Smoothly moves a value label between real intermediate sensor readings."""
+    """Animates a value while measuring, then settles on the final reading."""
 
     def __init__(self, label: QLabel, decimals: int, parent: QObject) -> None:
         super().__init__(parent)
@@ -436,18 +436,26 @@ class LiveNumberDisplay(QObject):
         self.decimals = decimals
         self.current: float | None = None
         self.target: float | None = None
+        self.busy_values: tuple[float, ...] = ()
+        self.busy_index = 0
         self.timer = QTimer(self)
         self.timer.setInterval(70)
         self.timer.timeout.connect(self._tick)
 
-    def begin(self) -> None:
+    def begin_busy(self, values: tuple[float, ...]) -> None:
         self.timer.stop()
         self.current = None
         self.target = None
+        self.busy_values = values
+        self.busy_index = 0
         self.label.setText("--")
+        self.timer.setInterval(140)
+        self.timer.start()
 
     def set_target(self, value: float) -> None:
+        self.busy_values = ()
         self.target = float(value)
+        self.timer.setInterval(70)
         if self.current is None:
             self.current = self.target
             self._render()
@@ -457,16 +465,24 @@ class LiveNumberDisplay(QObject):
 
     def finish(self, value: float) -> None:
         self.timer.stop()
+        self.busy_values = ()
         self.current = float(value)
         self.target = self.current
         self._render()
 
     def stop(self) -> None:
         self.timer.stop()
+        self.busy_values = ()
         self.current = None
         self.target = None
 
     def _tick(self) -> None:
+        if self.busy_values:
+            self.current = self.busy_values[self.busy_index]
+            self.busy_index = (self.busy_index + 1) % len(self.busy_values)
+            self._render()
+            return
+
         if self.current is None or self.target is None:
             self.timer.stop()
             return
@@ -590,34 +606,71 @@ class CareKeeperWindow(QMainWindow):
         self.popup_overlay = PopupOverlay(self)
 
     def _build_live_value_displays(self) -> None:
+        self.bp_sys_live_display = LiveNumberDisplay(self.lbl_sys_value, 0, self)
+        self.bp_dia_live_display = LiveNumberDisplay(self.lbl_dia_value, 0, self)
+        self.bp_pulse_live_display = LiveNumberDisplay(self.lbl_pulse_value, 0, self)
         self.spo2_live_display = LiveNumberDisplay(self.lbl_spo2_value, 0, self)
         self.temp_live_display = LiveNumberDisplay(self.lbl_temp_value, 1, self)
 
     def _begin_measurement_display(self, kind: str) -> None:
+        self._clear_measurement_value(kind)
         self.measurement_active[kind] = True
         if kind == "bp":
+            self.bp_sys_live_display.begin_busy((88, 104, 121, 139, 158, 142, 126, 116))
+            self.bp_dia_live_display.begin_busy((54, 62, 71, 83, 92, 86, 78, 72))
+            self.bp_pulse_live_display.begin_busy((64, 68, 73, 77, 81, 75, 70, 68))
+        elif kind == "spo2":
+            self.spo2_live_display.begin_busy((91, 93, 95, 97, 98, 96))
+        elif kind == "temp":
+            self.temp_live_display.begin_busy((35.4, 35.8, 36.1, 36.4, 36.7, 36.5))
+
+    def _clear_measurement_value(self, kind: str) -> None:
+        if kind == "bp":
+            self.vitals.systolic = None
+            self.vitals.diastolic = None
+            self.vitals.pulse = None
             self.lbl_sys_value.setText("--")
             self.lbl_dia_value.setText("--")
             self.lbl_pulse_value.setText("--")
+            self.sum_bp_value.setText("--/--")
+            self.sum_pulse_value.setText("--")
         elif kind == "spo2":
-            self.spo2_live_display.begin()
+            self.vitals.spo2 = None
+            self.lbl_spo2_value.setText("--")
+            self.sum_spo2_value.setText("--")
         elif kind == "temp":
-            self.temp_live_display.begin()
+            self.vitals.temperature = None
+            self.lbl_temp_value.setText("--")
+            self.sum_temp_value.setText("--")
+        self._refresh_summary_badges()
+        self._refresh_summary_button()
 
     def _finish_measurement_display(self, kind: str, value: object | None = None) -> None:
         self.measurement_active[kind] = False
-        if kind == "spo2" and value is not None:
+        if kind == "bp":
+            self.bp_sys_live_display.stop()
+            self.bp_dia_live_display.stop()
+            self.bp_pulse_live_display.stop()
+        elif kind == "spo2" and value is not None:
             self.spo2_live_display.finish(float(value))
         elif kind == "temp" and value is not None:
             self.temp_live_display.finish(float(value))
 
     def _cancel_measurement_display(self, kind: str) -> None:
         self.measurement_active[kind] = False
-        if kind == "spo2":
+        if kind == "bp":
+            self.bp_sys_live_display.stop()
+            self.bp_dia_live_display.stop()
+            self.bp_pulse_live_display.stop()
+            self.lbl_sys_value.setText("--")
+            self.lbl_dia_value.setText("--")
+            self.lbl_pulse_value.setText("--")
+        elif kind == "spo2":
             self.spo2_live_display.stop()
+            self.lbl_spo2_value.setText("--")
         elif kind == "temp":
             self.temp_live_display.stop()
-        self._refresh_values()
+            self.lbl_temp_value.setText("--")
 
     def _on_measurement_progress(self, kind: str, value: object, state: object) -> None:
         if kind not in self.measurement_active or not self.measurement_active[kind]:
@@ -626,7 +679,7 @@ class CareKeeperWindow(QMainWindow):
         details = state if isinstance(state, dict) else {}
         if kind == "spo2":
             if not details.get("finger_detected", True):
-                self.spo2_live_display.begin()
+                self.spo2_live_display.begin_busy((91, 93, 95, 97, 98, 96))
                 self._set_system_message("กรุณาวางนิ้วให้แนบเต็มเซนเซอร์", success=None)
             elif value is None:
                 self._set_system_message("กำลังอ่านสัญญาณ กรุณาวางนิ่งไว้", success=None)
@@ -635,7 +688,7 @@ class CareKeeperWindow(QMainWindow):
                 self._set_system_message("ค่ากำลังเปลี่ยน กรุณารอจนกว่าจะนิ่ง", success=None)
         elif kind == "temp":
             if not details.get("in_contact", True):
-                self.temp_live_display.begin()
+                self.temp_live_display.begin_busy((35.4, 35.8, 36.1, 36.4, 36.7, 36.5))
                 self._set_system_message("กรุณาแนบเซนเซอร์กับผิวให้สนิท", success=None)
             elif value is not None:
                 self.temp_live_display.set_target(float(value))
@@ -2185,6 +2238,9 @@ class CareKeeperWindow(QMainWindow):
     def _reset_session(self) -> None:
         for kind in self.measurement_active:
             self.measurement_active[kind] = False
+        self.bp_sys_live_display.stop()
+        self.bp_dia_live_display.stop()
+        self.bp_pulse_live_display.stop()
         self.spo2_live_display.stop()
         self.temp_live_display.stop()
         self.patient = PatientInfo()
