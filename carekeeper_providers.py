@@ -121,6 +121,12 @@ class CareKeeperProvider:
 
     on_retry_attempt: Callable[[str, int, int], None] | None = None
     on_retry_giveup: Callable[[str, str], None] | None = None
+    on_measurement_progress: Callable[[str, object, dict], None] | None = None
+
+    def _notify_measurement_progress(self, kind: str, value: object, **state) -> None:
+        callback = getattr(self, "on_measurement_progress", None)
+        if callback:
+            callback(kind, value, state)
 
     def read_patient(self) -> PatientInfo:
         raise NotImplementedError
@@ -191,12 +197,31 @@ class MockCareKeeperProvider(CareKeeperProvider):
         )
 
     def measure_spo2(self) -> int:
-        time.sleep(0.9)
-        return random.randint(96, 100)
+        final = random.randint(96, 100)
+        samples = [max(90, final - 4), final - 2, final - 1, final, final]
+        for index, value in enumerate(samples):
+            time.sleep(0.18)
+            self._notify_measurement_progress(
+                "spo2",
+                value,
+                bpm=random.randint(66, 92),
+                stable=index == len(samples) - 1,
+                finger_detected=True,
+            )
+        return final
 
     def measure_temperature(self) -> float:
-        time.sleep(0.9)
-        return round(random.uniform(36.2, 37.4), 1)
+        final = round(random.uniform(36.2, 37.4), 1)
+        samples = [final - 0.8, final - 0.4, final - 0.2, final, final]
+        for index, value in enumerate(samples):
+            time.sleep(0.18)
+            self._notify_measurement_progress(
+                "temp",
+                round(value, 1),
+                stable=index == len(samples) - 1,
+                in_contact=True,
+            )
+        return final
 
     def get_device_status(self) -> DeviceStatus:
         self._battery_percent = max(10, self._battery_percent - random.choice([0, 0, 1]))
@@ -477,7 +502,11 @@ class RealCareKeeperProvider(CareKeeperProvider):
         # first in-range sample that happened to come out of the algorithm.
         # Values outside 70-100% and finger-off windows are rejected inside
         # measure_spo2(), which returns None if nothing ever settles.
-        result = monitor.measure_spo2()
+        result = monitor.measure_spo2(
+            on_progress=lambda spo2, **state: self._notify_measurement_progress(
+                "spo2", spo2, **state
+            )
+        )
         if result is None:
             raise RuntimeError(self._spo2_failure_message(monitor))
         return int(result)
@@ -512,7 +541,11 @@ class RealCareKeeperProvider(CareKeeperProvider):
         except Exception as e:
             raise RuntimeError(f"ไม่พบเซนเซอร์อุณหภูมิ (DS18B20): {e}")
 
-        result = sensor.measure_body_temperature()
+        result = sensor.measure_body_temperature(
+            on_progress=lambda temp, **state: self._notify_measurement_progress(
+                "temp", temp, **state
+            )
+        )
         if result is None:
             raise RuntimeError("วัดอุณหภูมิไม่สำเร็จ (แนบเซนเซอร์กับผิวแล้วรอให้ค่านิ่ง)")
         return float(result)

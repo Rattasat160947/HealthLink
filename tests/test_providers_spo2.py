@@ -111,6 +111,27 @@ def test_spo2_returns_the_settled_value(provider, monkeypatch):
     assert SubsystemRegistry.get("spo2").disabled is False
 
 
+def test_spo2_forwards_real_intermediate_readings_to_the_ui(provider, monkeypatch):
+    class _ProgressMonitor(_FakeMonitor):
+        def measure_spo2(self, on_progress=None):
+            on_progress(94, bpm=68, stable=False, finger_detected=True)
+            on_progress(97, bpm=70, stable=True, finger_detected=True)
+            return 97
+
+    monitor = _ProgressMonitor(spo2=97)
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+    seen = []
+    provider.on_measurement_progress = lambda kind, value, state: seen.append(
+        (kind, value, state)
+    )
+
+    assert provider.measure_spo2() == 97
+    assert seen == [
+        ("spo2", 94, {"bpm": 68, "stable": False, "finger_detected": True}),
+        ("spo2", 97, {"bpm": 70, "stable": True, "finger_detected": True}),
+    ]
+
+
 def test_spo2_open_passes_read_timeout_to_monitor(provider, monkeypatch):
     """_SPO2_READ_TIMEOUT is the single knob for how long a measurement may
     take; it has to reach the monitor, which owns the settling loop now."""
@@ -210,6 +231,26 @@ class _FakeTempSensor:
 def test_measure_temperature_returns_value(provider, monkeypatch):
     monkeypatch.setattr("lib.temp_sensor.temp_sensor", _FakeTempSensor)
     assert provider.measure_temperature() == 36.7
+
+
+def test_temperature_forwards_real_intermediate_readings_to_the_ui(provider, monkeypatch):
+    class _ProgressTempSensor(_FakeTempSensor):
+        def measure_body_temperature(self, on_progress=None):
+            on_progress(35.9, stable=False, in_contact=True)
+            on_progress(36.6, stable=True, in_contact=True)
+            return 36.6
+
+    monkeypatch.setattr("lib.temp_sensor.temp_sensor", _ProgressTempSensor)
+    seen = []
+    provider.on_measurement_progress = lambda kind, value, state: seen.append(
+        (kind, value, state)
+    )
+
+    assert provider.measure_temperature() == 36.6
+    assert seen == [
+        ("temp", 35.9, {"stable": False, "in_contact": True}),
+        ("temp", 36.6, {"stable": True, "in_contact": True}),
+    ]
 
 
 def test_measure_temperature_none_raises(provider, monkeypatch):

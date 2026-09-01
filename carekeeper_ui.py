@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import getpass
-import math
 import os
 import socket
 import sys
@@ -169,6 +168,12 @@ class QueueDrainNotifier(QObject):
 
     drain_success = Signal(int)
     drain_failure = Signal(int, str)
+
+
+class MeasurementProgressNotifier(QObject):
+    """Moves live sensor readings from provider threads onto the GUI thread."""
+
+    progress = Signal(str, object, object)
 
 class WifiIndicator(QWidget):
     clicked = Signal()
@@ -422,155 +427,66 @@ class PopupOverlay(QWidget):
         self.hide()
 
 
-class MeasurementPulse(QWidget):
-    """Animated breathing ring used by a non-blocking measurement status card."""
+class LiveNumberDisplay(QObject):
+    """Smoothly moves a value label between real intermediate sensor readings."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, label: QLabel, decimals: int, parent: QObject) -> None:
         super().__init__(parent)
-        self.setFixedSize(66, 66)
-        self._phase = 0.0
-        self._accent = QColor("#75efff")
-        self._state = "busy"
-        self._timer = QTimer(self)
-        self._timer.setInterval(45)
-        self._timer.timeout.connect(self._advance)
+        self.label = label
+        self.decimals = decimals
+        self.current: float | None = None
+        self.target: float | None = None
+        self.timer = QTimer(self)
+        self.timer.setInterval(70)
+        self.timer.timeout.connect(self._tick)
 
-    def show_busy(self, accent: str) -> None:
-        self._accent = QColor(accent)
-        self._state = "busy"
-        self._phase = 0.0
-        self._timer.start()
-        self.update()
+    def begin(self) -> None:
+        self.timer.stop()
+        self.current = None
+        self.target = None
+        self.label.setText("--")
 
-    def show_result(self, success: bool, accent: str) -> None:
-        self._timer.stop()
-        self._accent = QColor(accent)
-        self._state = "success" if success else "failure"
-        self.update()
+    def set_target(self, value: float) -> None:
+        self.target = float(value)
+        if self.current is None:
+            self.current = self.target
+            self._render()
+            return
+        if not self.timer.isActive():
+            self.timer.start()
+
+    def finish(self, value: float) -> None:
+        self.timer.stop()
+        self.current = float(value)
+        self.target = self.current
+        self._render()
 
     def stop(self) -> None:
-        self._timer.stop()
+        self.timer.stop()
+        self.current = None
+        self.target = None
 
-    def _advance(self) -> None:
-        self._phase = (self._phase + 0.075) % (math.pi * 2)
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        center = self.rect().center()
-
-        if self._state == "busy":
-            breath = (math.sin(self._phase) + 1.0) / 2.0
-            outer_radius = 22.0 + breath * 7.0
-            halo = QColor(self._accent)
-            halo.setAlpha(45 + int(breath * 55))
-            painter.setPen(QPen(halo, 5.0))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(center, outer_radius, outer_radius)
-
-            painter.setPen(QPen(self._accent, 4.0))
-            painter.drawEllipse(center, 18.0, 18.0)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(self._accent))
-            painter.drawEllipse(center, 7.0, 7.0)
+    def _tick(self) -> None:
+        if self.current is None or self.target is None:
+            self.timer.stop()
             return
 
-        painter.setPen(QPen(self._accent, 4.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(center, 24.0, 24.0)
-        if self._state == "success":
-            painter.drawLine(center.x() - 11, center.y(), center.x() - 3, center.y() + 9)
-            painter.drawLine(center.x() - 3, center.y() + 9, center.x() + 14, center.y() - 11)
+        difference = self.target - self.current
+        minimum_step = 1.0 if self.decimals == 0 else 0.1
+        if abs(difference) <= minimum_step:
+            self.current = self.target
+            self.timer.stop()
         else:
-            painter.drawLine(center.x() - 10, center.y() - 10, center.x() + 10, center.y() + 10)
-            painter.drawLine(center.x() + 10, center.y() - 10, center.x() - 10, center.y() + 10)
+            self.current += minimum_step if difference > 0 else -minimum_step
+        self._render()
 
-
-class MeasurementStatusCard(QFrame):
-    """Compact in-panel card that keeps the rest of the dashboard visible."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("MeasurementStatusCard")
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setFixedHeight(118)
-        self._hide_timer = QTimer(self)
-        self._hide_timer.setSingleShot(True)
-        self._hide_timer.timeout.connect(self.hide_card)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 16, 22, 16)
-        layout.setSpacing(16)
-
-        self.indicator = MeasurementPulse(self)
-        layout.addWidget(self.indicator, 0, Qt.AlignVCenter)
-
-        text_layout = QVBoxLayout()
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(3)
-        text_layout.addStretch(1)
-
-        self.title_label = QLabel(self)
-        self.title_label.setObjectName("MeasurementStatusTitle")
-        self.title_label.setWordWrap(True)
-
-        self.detail_label = QLabel(self)
-        self.detail_label.setObjectName("MeasurementStatusDetail")
-        self.detail_label.setWordWrap(True)
-
-        text_layout.addWidget(self.title_label)
-        text_layout.addWidget(self.detail_label)
-        text_layout.addStretch(1)
-        layout.addLayout(text_layout, 1)
-        self.hide()
-
-    def show_busy(self, title: str, detail: str, accent: str) -> None:
-        self._hide_timer.stop()
-        self.title_label.setText(title)
-        self.detail_label.setText(detail)
-        self._apply_accent(accent)
-        self.indicator.show_busy(accent)
-        self.raise_()
-        self.show()
-
-    def show_result(
-        self,
-        success: bool,
-        title: str,
-        detail: str,
-        *,
-        duration_ms: int,
-    ) -> None:
-        accent = "#22c55e" if success else "#fb4f64"
-        self.title_label.setText(title)
-        self.detail_label.setText(detail)
-        self._apply_accent(accent)
-        self.indicator.show_result(success, accent)
-        self.raise_()
-        self.show()
-        self._hide_timer.start(duration_ms)
-
-    def hide_card(self) -> None:
-        self._hide_timer.stop()
-        self.indicator.stop()
-        self.hide()
-
-    def _apply_accent(self, accent: str) -> None:
-        self.setStyleSheet(
-            "QFrame#MeasurementStatusCard {"
-            "background-color: #10151b;"
-            f"border: 3px solid {accent};"
-            "border-radius: 22px;"
-            "}"
-            "QLabel#MeasurementStatusTitle {"
-            f"color: {accent}; font-size: 21px; font-weight: 900; background: transparent;"
-            "}"
-            "QLabel#MeasurementStatusDetail {"
-            "color: #f8fafc; font-size: 15px; font-weight: 800; background: transparent;"
-            "}"
-        )
+    def _render(self) -> None:
+        if self.current is None:
+            self.label.setText("--")
+        elif self.decimals == 0:
+            self.label.setText(str(int(round(self.current))))
+        else:
+            self.label.setText(f"{self.current:.{self.decimals}f}")
 
 _SUBSYSTEM_LABELS = {
     "wifi": "Wi-Fi",
@@ -615,6 +531,13 @@ class CareKeeperWindow(QMainWindow):
         self.provider.on_retry_attempt = lambda s, a, m: self.retry_notifier.attempt.emit(s, a, m)
         self.provider.on_retry_giveup = lambda s, r: self.retry_notifier.give_up.emit(s, r)
 
+        self.measurement_notifier = MeasurementProgressNotifier()
+        self.measurement_notifier.progress.connect(self._on_measurement_progress)
+        self.provider.on_measurement_progress = (
+            lambda kind, value, state: self.measurement_notifier.progress.emit(kind, value, state)
+        )
+        self.measurement_active = {"bp": False, "spo2": False, "temp": False}
+
         self.submission_queue = SubmissionQueue()
         self.queue_notifier = QueueDrainNotifier()
         self.queue_notifier.drain_success.connect(self._on_queue_drain_success)
@@ -640,7 +563,7 @@ class CareKeeperWindow(QMainWindow):
         self._build_summary_page()
         self._apply_styles()
         self._build_toast()
-        self._build_measurement_status_cards()
+        self._build_live_value_displays()
         self._refresh_patient()
         self._refresh_values()
 
@@ -666,87 +589,57 @@ class CareKeeperWindow(QMainWindow):
 
         self.popup_overlay = PopupOverlay(self)
 
-    def _build_measurement_status_cards(self) -> None:
-        self.bp_status_card = MeasurementStatusCard(self.nibp_section)
-        self.spo2_status_card = MeasurementStatusCard(self.spo2_row)
-        self.temp_status_card = MeasurementStatusCard(self.temp_row)
+    def _build_live_value_displays(self) -> None:
+        self.spo2_live_display = LiveNumberDisplay(self.lbl_spo2_value, 0, self)
+        self.temp_live_display = LiveNumberDisplay(self.lbl_temp_value, 1, self)
 
-    @staticmethod
-    def _place_measurement_status_card(
-        card: MeasurementStatusCard,
-        host: QWidget,
-        *,
-        reserved_right: int = 0,
-    ) -> None:
-        available_width = max(0, host.width() - reserved_right)
-        width = min(340, max(260, available_width - 28))
-        x = max(8, (available_width - width) // 2)
-        y = max(8, (host.height() - card.height()) // 2)
-        card.setGeometry(x, y, width, card.height())
+    def _begin_measurement_display(self, kind: str) -> None:
+        self.measurement_active[kind] = True
+        if kind == "bp":
+            self.lbl_sys_value.setText("--")
+            self.lbl_dia_value.setText("--")
+            self.lbl_pulse_value.setText("--")
+        elif kind == "spo2":
+            self.spo2_live_display.begin()
+        elif kind == "temp":
+            self.temp_live_display.begin()
 
-    def _show_measurement_busy(self, kind: str) -> None:
-        settings = {
-            "bp": (
-                self.bp_status_card,
-                self.nibp_section,
-                0,
-                "กำลังวัดความดัน",
-                "กรุณาอยู่นิ่งและไม่ขยับแขน",
-                "#fff11a",
-            ),
-            "spo2": (
-                self.spo2_status_card,
-                self.spo2_row,
-                self.btn_spo2.width(),
-                "กำลังวัดออกซิเจน",
-                "กรุณาวางนิ้วค้างไว้และอยู่นิ่ง",
-                "#75efff",
-            ),
-            "temp": (
-                self.temp_status_card,
-                self.temp_row,
-                self.btn_temp.width(),
-                "กำลังวัดอุณหภูมิ",
-                "กรุณาแนบเซนเซอร์กับผิวค้างไว้",
-                "#19c464",
-            ),
-        }
-        card, host, reserved_right, title, detail, accent = settings[kind]
-        self._place_measurement_status_card(card, host, reserved_right=reserved_right)
-        card.show_busy(title, detail, accent)
+    def _finish_measurement_display(self, kind: str, value: object | None = None) -> None:
+        self.measurement_active[kind] = False
+        if kind == "spo2" and value is not None:
+            self.spo2_live_display.finish(float(value))
+        elif kind == "temp" and value is not None:
+            self.temp_live_display.finish(float(value))
 
-    def _show_measurement_result(self, kind: str, success: bool) -> None:
-        settings = {
-            "bp": (
-                self.bp_status_card,
-                self.nibp_section,
-                0,
-                "บันทึกผลการวัดแล้ว",
-                "กรุณาตรวจสอบเครื่องแล้วลองอีกครั้ง",
-            ),
-            "spo2": (
-                self.spo2_status_card,
-                self.spo2_row,
-                self.btn_spo2.width(),
-                "บันทึกผลการวัดแล้ว",
-                "กรุณาวางนิ้วให้แนบสนิทแล้วลองอีกครั้ง",
-            ),
-            "temp": (
-                self.temp_status_card,
-                self.temp_row,
-                self.btn_temp.width(),
-                "บันทึกผลการวัดแล้ว",
-                "กรุณาแนบเซนเซอร์กับผิวแล้วลองอีกครั้ง",
-            ),
-        }
-        card, host, reserved_right, success_detail, failure_detail = settings[kind]
-        self._place_measurement_status_card(card, host, reserved_right=reserved_right)
-        card.show_result(
-            success,
-            "วัดสำเร็จ" if success else "วัดไม่สำเร็จ",
-            success_detail if success else failure_detail,
-            duration_ms=1600 if success else 2600,
-        )
+    def _cancel_measurement_display(self, kind: str) -> None:
+        self.measurement_active[kind] = False
+        if kind == "spo2":
+            self.spo2_live_display.stop()
+        elif kind == "temp":
+            self.temp_live_display.stop()
+        self._refresh_values()
+
+    def _on_measurement_progress(self, kind: str, value: object, state: object) -> None:
+        if kind not in self.measurement_active or not self.measurement_active[kind]:
+            return
+
+        details = state if isinstance(state, dict) else {}
+        if kind == "spo2":
+            if not details.get("finger_detected", True):
+                self.spo2_live_display.begin()
+                self._set_system_message("กรุณาวางนิ้วให้แนบเต็มเซนเซอร์", success=None)
+            elif value is None:
+                self._set_system_message("กำลังอ่านสัญญาณ กรุณาวางนิ่งไว้", success=None)
+            else:
+                self.spo2_live_display.set_target(float(value))
+                self._set_system_message("ค่ากำลังเปลี่ยน กรุณารอจนกว่าจะนิ่ง", success=None)
+        elif kind == "temp":
+            if not details.get("in_contact", True):
+                self.temp_live_display.begin()
+                self._set_system_message("กรุณาแนบเซนเซอร์กับผิวให้สนิท", success=None)
+            elif value is not None:
+                self.temp_live_display.set_target(float(value))
+                self._set_system_message("ค่ากำลังเปลี่ยน กรุณารอจนกว่าจะนิ่ง", success=None)
 
     def _show_popup(self, message: str, success: bool = True, duration_ms: int = 2200) -> None:
         self.popup_overlay.show_message(message, success=success)
@@ -1746,7 +1639,6 @@ class CareKeeperWindow(QMainWindow):
 
         nibp = QFrame()
         nibp.setObjectName("NibpSection")
-        self.nibp_section = nibp
         nibp_layout = QVBoxLayout(nibp)
         nibp_layout.setContentsMargins(28, 10, 26, 4)
         nibp_layout.setSpacing(0)
@@ -1774,7 +1666,6 @@ class CareKeeperWindow(QMainWindow):
 
         spo2_row = QFrame()
         spo2_row.setObjectName("RightMetricRow")
-        self.spo2_row = spo2_row
         spo2_layout = QHBoxLayout(spo2_row)
         spo2_layout.setContentsMargins(22, 10, 0, 0)
         spo2_layout.setSpacing(0)
@@ -1804,7 +1695,6 @@ class CareKeeperWindow(QMainWindow):
 
         temp_row = QFrame()
         temp_row.setObjectName("RightMetricRow")
-        self.temp_row = temp_row
         temp_layout = QHBoxLayout(temp_row)
         temp_layout.setContentsMargins(22, 10, 0, 0)
         temp_layout.setSpacing(0)
@@ -1850,7 +1740,7 @@ class CareKeeperWindow(QMainWindow):
         footer_layout.addWidget(self.btn_back_home_measure)
         # Elides so that, with the back button now sharing the row, a long status
         # line shrinks instead of pushing the buttons off a narrow screen.
-        self.lbl_system_message = ElidedLabel("SYSTEM: รอคำสั่งวัดค่า")
+        self.lbl_system_message = ElidedLabel("สถานะ: รอคำสั่งวัดค่า")
         self.lbl_system_message.setObjectName("SystemMessageNeutral")
         self.lbl_system_message.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.lbl_measure_count = self._console_label("วัดค่าสำเร็จแล้ว 0 รายการ", "FooterHint")
@@ -1987,7 +1877,7 @@ class CareKeeperWindow(QMainWindow):
         self.history_panel.hide()
         panel_layout.addWidget(self.history_panel)
 
-        self.lbl_summary_system_message = self._console_label("SYSTEM: ตรวจสอบข้อมูลก่อนบันทึก", "SystemMessageNeutral")
+        self.lbl_summary_system_message = self._console_label("สถานะ: ตรวจสอบข้อมูลก่อนบันทึก", "SystemMessageNeutral")
         panel_layout.addWidget(self.lbl_summary_system_message)
 
         footer = QHBoxLayout()
@@ -2069,18 +1959,20 @@ class CareKeeperWindow(QMainWindow):
 
     def _set_system_message(self, message: str, success: bool | None = None) -> None:
         object_name = "SystemMessageNeutral"
-        prefix = "SYSTEM"
+        prefix = "สถานะ"
         if success is True:
             object_name = "SystemMessageSuccess"
-            prefix = "SUCCESSFUL"
+            prefix = "สำเร็จ"
         elif success is False:
             object_name = "SystemMessageFail"
-            prefix = "FAIL"
+            prefix = "ไม่สำเร็จ"
 
         text = f"{prefix}: {message}"
         for label_name in ("lbl_system_message", "lbl_summary_system_message"):
             label = getattr(self, label_name, None)
             if label is None:
+                continue
+            if label.objectName() == object_name and label.text() == text:
                 continue
             label.setObjectName(object_name)
             label.setText(text)
@@ -2222,7 +2114,7 @@ class CareKeeperWindow(QMainWindow):
             SubsystemRegistry.get("bp_monitor").enable()
         self._set_measure_button(self.btn_bp, "BtnNIBPBusy", "กำลังวัด\nความดัน", False)
         self._set_system_message("กำลังวัดความดันโลหิต", success=None)
-        self._show_measurement_busy("bp")
+        self._begin_measurement_display("bp")
         self._start_task(self.provider.measure_blood_pressure, self._on_bp_done, self._on_bp_failed)
 
     def _on_bp_done(self, result: object) -> None:
@@ -2230,15 +2122,15 @@ class CareKeeperWindow(QMainWindow):
             self.vitals.systolic = result.systolic
             self.vitals.diastolic = result.diastolic
             self.vitals.pulse = result.pulse
+        self._finish_measurement_display("bp")
         self._start_bp_cooldown(self.BP_COOLDOWN_AFTER_SUCCESS, succeeded=True)
         self._set_system_message("วัดความดันโลหิตสำเร็จ", success=True)
-        self._show_measurement_result("bp", True)
         self._refresh_values()
 
     def _on_bp_failed(self, message: str) -> None:
         self._set_measure_button(self.btn_bp, "BtnNIBPFail", "วัดไม่สำเร็จ\nความดัน", True)
         self._set_system_message(f"วัดความดันไม่สำเร็จ: {message}", success=False)
-        self._show_measurement_result("bp", False)
+        self._cancel_measurement_display("bp")
         # A BP_ERROR parks the cuff in a lockout of its own, so give it a
         # moment rather than letting the operator hammer the button into a
         # device that is not listening. See BP_COOLDOWN_AFTER_DEVICE_ERROR for
@@ -2257,42 +2149,44 @@ class CareKeeperWindow(QMainWindow):
             SubsystemRegistry.get("spo2").enable()
         self._set_measure_button(self.btn_spo2, "BtnSpO2Busy", "กำลังวัด\nออกซิเจน", False)
         self._set_system_message("กำลังวัดออกซิเจนในเลือด", success=None)
-        self._show_measurement_busy("spo2")
+        self._begin_measurement_display("spo2")
         self._start_task(self.provider.measure_spo2, self._on_spo2_done, self._on_spo2_failed)
 
     def _on_spo2_done(self, result: object) -> None:
         self.vitals.spo2 = int(result)
+        self._finish_measurement_display("spo2", result)
         self._set_measure_button(self.btn_spo2, "BtnSpO2Done", "วัดแล้ว\nออกซิเจน", True)
         self._set_system_message("วัดออกซิเจนในเลือดสำเร็จ", success=True)
-        self._show_measurement_result("spo2", True)
         self._refresh_values()
 
     def _on_spo2_failed(self, message: str) -> None:
         self._set_measure_button(self.btn_spo2, "BtnSpO2Fail", "วัดไม่สำเร็จ\nออกซิเจน", True)
         self._set_system_message(f"วัดออกซิเจนไม่สำเร็จ: {message}", success=False)
-        self._show_measurement_result("spo2", False)
+        self._cancel_measurement_display("spo2")
 
     def _measure_temperature(self) -> None:
         self._set_measure_button(self.btn_temp, "BtnTempBusy", "กำลังวัด\nอุณหภูมิ", False)
         self._set_system_message("กำลังวัดอุณหภูมิร่างกาย", success=None)
-        self._show_measurement_busy("temp")
+        self._begin_measurement_display("temp")
         self._start_task(self.provider.measure_temperature, self._on_temperature_done, self._on_temperature_failed)
 
     def _on_temperature_done(self, result: object) -> None:
         self.vitals.temperature = float(result)
+        self._finish_measurement_display("temp", result)
         self._set_measure_button(self.btn_temp, "BtnTempDone", "วัดแล้ว\nอุณหภูมิ", True)
         self._set_system_message("วัดอุณหภูมิร่างกายสำเร็จ", success=True)
-        self._show_measurement_result("temp", True)
         self._refresh_values()
 
     def _on_temperature_failed(self, message: str) -> None:
         self._set_measure_button(self.btn_temp, "BtnTempFail", "วัดไม่สำเร็จ\nอุณหภูมิ", True)
         self._set_system_message(f"วัดอุณหภูมิไม่สำเร็จ: {message}", success=False)
-        self._show_measurement_result("temp", False)
+        self._cancel_measurement_display("temp")
 
     def _reset_session(self) -> None:
-        for card in (self.bp_status_card, self.spo2_status_card, self.temp_status_card):
-            card.hide_card()
+        for kind in self.measurement_active:
+            self.measurement_active[kind] = False
+        self.spo2_live_display.stop()
+        self.temp_live_display.stop()
         self.patient = PatientInfo()
         self.vitals = VitalState()
         self.bp_cooldown_seconds = 0
