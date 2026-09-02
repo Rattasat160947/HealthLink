@@ -1,7 +1,7 @@
 # รายงานผลการทดสอบซอฟต์แวร์ (Software Test Report) — CareKeeper
 
 - **วันที่จัดทำ:** 4 กรกฎาคม 2569 (2026-07-04)
-- **ปรับปรุงล่าสุด:** 24 สิงหาคม 2569 (2026-08-24) — แก้อาการเครื่องวัดความดันวัดไม่ติดหลังเปิด/restart (สั่ง RESET ล้าง state ค้างของ firmware ก่อนวัด)
+- **ปรับปรุงล่าสุด:** 2 กันยายน 2569 (2026-09-02) — เพิ่มการวินิจฉัยสาเหตุที่สัญญาณ SpO2 ใช้ไม่ได้ (แสงอิ่มตัว / นิ้ววางไม่ตรงกลาง / ไม่มีจังหวะชีพจร / สัญญาณขาดช่วง) แทนข้อความรวม "สัญญาณอ่อนเกินไป"
 - **ผู้จัดทำ:** ทีมพัฒนา CareKeeper
 - **ขอบเขต:** Unit test และ Integration test ระดับโมดูลของแอปพลิเคชัน CareKeeper (เครื่องวัดสุขภาพประจำจุดบริการ บน Raspberry Pi)
 
@@ -11,16 +11,18 @@
 
 | ตัวชี้วัด | ค่าที่วัดได้ |
 |---|---|
-| จำนวนกรณีทดสอบ (test cases) ทั้งหมด | **248** |
-| ผ่าน | **248 (100%)** |
+| จำนวนกรณีทดสอบ (test cases) ทั้งหมด | **261** |
+| ผ่าน | **261 (100%)** |
 | ไม่ผ่าน | 0 |
-| ความครอบคลุมของโค้ด (code coverage) โมดูลตรรกะ | **70%** (1,797 statements, พลาด 545) |
-| เวลาที่ใช้รันทั้งชุด | **~3 วินาที** |
+| ความครอบคลุมของโค้ด (code coverage) โมดูลตรรกะ | **71%** (1,616 statements, พลาด 468) |
+| เวลาที่ใช้รันทั้งชุด | **~8 วินาที** |
 | การพึ่งพาฮาร์ดแวร์/เครือข่ายจริง | **ไม่มี** — รันซ้ำได้ทุกเครื่อง (deterministic) |
 
 > เดิมชุดทดสอบมี 52 กรณี (ผ่าน 49, ไม่ผ่าน 3) coverage **57%** → ปรับปรุงเป็น 161 กรณี coverage **79%**
-> รอบล่าสุดเพิ่มเป็น **248 กรณี** ผ่านทั้งหมด (เพิ่มการหาค่านิ่งของ SpO2, cooldown ปุ่มวัดความดันบน GUI,
-> การสั่ง `RESET` ล้าง state ค้างของ firmware ก่อนวัด และการอ่าน `NOT_READY:<state>`)
+> รอบล่าสุดนับได้ **261 กรณี** ผ่านทั้งหมด (เพิ่มการวินิจฉัยสาเหตุของสัญญาณ SpO2 ที่คำนวณค่าไม่ได้
+> ทั้งระดับไลบรารี, ข้อความที่ provider ส่งให้ผู้ใช้ และข้อความบนหน้าจอระหว่างวัด)
+> ตัวเลขในตารางข้อ 3 นับใหม่จาก `pytest --collect-only` ทั้งหมด — ของเดิมบางแถวค้างอยู่ที่รอบก่อน
+> และยังมีไฟล์ที่ถูกลบไปแล้ว (ชุดนาฬิกา H59) รวมอยู่ ตัวเลข coverage ก็วัดใหม่ด้วยคำสั่งในข้อ 6
 > ตัวหาร statements เพิ่มขึ้นจาก 1,128 เป็น 1,797 เพราะรวมไลบรารีเซนเซอร์ที่ย้ายเข้ามาใหม่
 > (`lib/spo2_max30102/*` ของ MAX30102 และ `lib/temp_sensor.py` ของ DS18B20) ซึ่งส่วนใหญ่เป็นโค้ดคุยกับฮาร์ดแวร์โดยตรง จึงทำให้ % รวมลดลงเป็น **70%**
 
@@ -41,7 +43,6 @@
 | ของจริง | ตัวแทนที่ใช้ในเทสต์ | ไฟล์ |
 |---|---|---|
 | เครื่องวัดความดัน (ESP32 ผ่าน Serial) | ป้อนบรรทัดข้อความโปรโตคอลตรงเข้า parser | `tests/test_bp_monitor_parsing.py` |
-| นาฬิกา H59 (Bluetooth LE) | อุปกรณ์จำลองที่บันทึกคำสั่งและฉีดแพ็กเก็ตตอบกลับ | `tests/test_h59_*.py` |
 | เครื่องอ่านบัตรประชาชน (PC/SC) | การเชื่อมต่อจำลองที่คืนค่า APDU ตามสคริปต์ | `tests/test_thaiidcard.py` |
 | UPS HAT (I2C) | โมดูล `smbus` ปลอมที่กำหนดค่า register ได้ | `tests/test_ups.py` |
 | เซนเซอร์ออกซิเจน MAX30102 (I2C) | เซนเซอร์ปลอมที่ป้อนบล็อกสัญญาณ (ระดับ IR ตั้งได้) + สคริปต์ค่าที่อัลกอริทึมคำนวณได้ | `tests/test_spo2_stability.py` |
@@ -53,30 +54,28 @@
 
 | ระบบย่อย | ไฟล์ทดสอบ | จำนวน |
 |---|---|---:|
-| นาฬิกา H59 (BLE): โครงแพ็กเก็ต/checksum | `test_h59_packets.py` | 7 |
-| นาฬิกา H59: แปลงแพ็กเก็ตชีพจรและ SpO2 (ขอบเขตค่า) | `test_h59_notify_parsers.py` | 23 |
-| นาฬิกา H59: ลำดับคำสั่งวัดค่า (warm-up → start → stop) | `test_h59_reader_flows.py` | 12 |
-| นาฬิกา H59: ชั้นสื่อสาร BLE (routing, keepalive, fan-out) | `test_h59_device.py` | 9 |
-| **เครื่องวัดความดัน: โปรโตคอล Serial + สถานะ `NOT_READY:<state>`** | `test_bp_monitor_parsing.py` | **27** |
-| **เครื่องวัดความดัน: retry, auto-detect พอร์ต, `RESET` ก่อนวัด** | `test_providers_bp.py` | **14** |
+| **เครื่องวัดความดัน: โปรโตคอล Serial + สถานะ `NOT_READY:<state>`** | `test_bp_monitor_parsing.py` | **45** |
+| **เครื่องวัดความดัน: retry, auto-detect พอร์ต, `RESET` ก่อนวัด** | `test_providers_bp.py` | **26** |
+| **SpO2 (MAX30102): การหาค่านิ่ง + การวินิจฉัยสาเหตุที่สัญญาณใช้ไม่ได้** | `test_spo2_stability.py` | **34** |
+| **SpO2: retry / timeout / ข้อความบอกสาเหตุ ระดับ provider** | `test_providers_spo2.py` | **21** |
 | บัตรประชาชน: แปลงวันเกิด พ.ศ. / TIS-620 / APDU | `test_thaiidcard.py` | 15 |
 | บัตรประชาชน: retry ระดับ provider | `test_providers_idcard.py` | 2 |
 | แบตเตอรี่ UPS: ถอดรหัส register I2C | `test_ups.py` | 15 |
-| **SpO2 (MAX30102): การหาค่านิ่ง (stable) ก่อนคืนค่าสุดท้าย** | `test_spo2_stability.py` | **23** |
-| SpO2: retry / timeout ระดับ provider | `test_providers_spo2.py` | 13 |
+| แบตเตอรี่: สถานะที่ provider รายงาน | `test_provider_battery_status.py` | 3 |
 | Backend: ส่งผลวัด (POST add_health) | `test_providers_send_data.py` | 8 |
 | Backend: ดึงประวัติผลวัด (GET health_history) | `test_providers_history.py` | 9 |
 | คิวออฟไลน์ (SQLite): จัดเก็บ/กู้คืน | `test_queue.py` | 7 |
 | คิวออฟไลน์: worker ส่งข้อมูลเบื้องหลัง | `test_queue_worker.py` | 5 |
 | กลไก retry และสถานะ subsystem | `test_retry_helper.py` | 8 |
-| Wi-Fi / Bluetooth ของตัวเครื่อง | `test_providers_wifi_bt.py` | 15 |
+| Wi-Fi / Bluetooth ของตัวเครื่อง | `test_providers_wifi_bt.py` | 10 |
 | โครงสร้างสถานะอุปกรณ์ | `test_device_status_fields.py` | 1 |
 | การทำงานข้าม thread (GUI ไม่ถูก block) | `test_threading.py` | 4 |
-| GUI: สถานะ disabled และการกดปุ่ม | `test_ui_status_disabled.py` | 6 |
-| GUI: ลำดับการบันทึกและส่งข้อมูล | `test_ui_submit_flow.py` | 3 |
+| **GUI: ค่าที่แสดงระหว่างวัด + ข้อความบอกสาเหตุสัญญาณ SpO2** | `test_ui_live_measurement.py` | **15** |
+| GUI: สถานะ disabled และการกดปุ่ม | `test_ui_status_disabled.py` | 7 |
+| GUI: ลำดับการบันทึกและส่งข้อมูล | `test_ui_submit_flow.py` | 13 |
 | GUI: ย่อข้อความยาวให้พอดีช่อง | `test_ui_elided_label.py` | 2 |
-| GUI: cooldown ปุ่มวัดความดันหลังวัดสำเร็จ/ผิดพลาด | `test_ui_bp_cooldown.py` | 9 |
-| **รวม** | | **248** |
+| GUI: cooldown ปุ่มวัดความดันหลังวัดสำเร็จ/ผิดพลาด | `test_ui_bp_cooldown.py` | 11 |
+| **รวม** | | **261** |
 
 ---
 
@@ -86,28 +85,24 @@
 
 | โมดูล | Statements | พลาด | Coverage |
 |---|---:|---:|---:|
-| `lib/h59_ble/__init__.py` | 5 | 0 | **100%** |
 | `lib/thaiidcard/apdu.py` | 6 | 0 | **100%** |
 | `lib/spo2_max30102/__init__.py` | 2 | 0 | **100%** |
-| `lib/h59_ble/spo2.py` | 57 | 1 | **98%** |
-| `lib/h59_ble/heart_rate.py` | 75 | 3 | **96%** |
 | `carekeeper_retry.py` | 109 | 5 | **95%** |
 | `carekeeper_queue.py` | 106 | 5 | **95%** |
 | `carekeeper_logging.py` | 12 | 1 | **92%** |
-| `lib/spo2_max30102/spo2_monitor.py` | 161 | 28 | **83%** |
-| `lib/ups.py` | 81 | 15 | **81%** |
-| `lib/bp_monitor.py` | 234 | 65 | **72%** |
+| `lib/spo2_max30102/spo2_monitor.py` | 212 | 29 | **86%** |
+| `lib/ups.py` | 82 | 15 | **82%** |
+| `lib/bp_monitor.py` | 290 | 65 | **78%** |
+| `carekeeper_providers.py` | 455 | 114 | **75%** |
 | `lib/thaiidcard/card.py` | 62 | 18 | **71%** |
-| `carekeeper_providers.py` | 488 | 144 | **70%** |
-| `lib/h59_ble/device.py` | 119 | 44 | **63%** |
 | `lib/spo2_max30102/max30102.py` | 94 | 56 | **40%** |
 | `lib/temp_sensor.py` | 81 | 63 | **22%** |
 | `lib/spo2_max30102/hrcalc.py` | 105 | 97 | **8%** |
-| **รวม** | **1,797** | **545** | **70%** |
+| **รวม** | **1,616** | **468** | **71%** |
 
-**ส่วนที่เหลือที่ยังไม่ครอบคลุม** ส่วนใหญ่เป็นโค้ดที่ต้องมีฮาร์ดแวร์/OS จริง ได้แก่ การ scan และ connect BLE จริง (`device.py`), การเรียก `nmcli`/`bluetoothctl`/`iwgetid` บน Raspberry Pi (`carekeeper_providers.py`), การเปิดพอร์ต Serial จริง (`bp_monitor.py`), การอ่าน register I2C ของ MAX30102 (`max30102.py`) และการอ่านไฟล์ 1-Wire ของ DS18B20 (`temp_sensor.py`) ซึ่งเหมาะกับการทดสอบแบบ hardware-in-the-loop มากกว่า unit test (ดูหัวข้อ 7)
+**ส่วนที่เหลือที่ยังไม่ครอบคลุม** ส่วนใหญ่เป็นโค้ดที่ต้องมีฮาร์ดแวร์/OS จริง ได้แก่ การเรียก `nmcli`/`bluetoothctl`/`iwgetid` บน Raspberry Pi (`carekeeper_providers.py`), การเปิดพอร์ต Serial จริง (`bp_monitor.py`), การอ่าน register I2C ของ MAX30102 (`max30102.py`) และการอ่านไฟล์ 1-Wire ของ DS18B20 (`temp_sensor.py`) ซึ่งเหมาะกับการทดสอบแบบ hardware-in-the-loop มากกว่า unit test (ดูหัวข้อ 7)
 
-> `hrcalc.py` (8%) คืออัลกอริทึมคำนวณ HR/SpO2 จากผู้ผลิตเซนเซอร์ ใช้ตามต้นฉบับโดยไม่แก้ไข การทดสอบของเราจึงครอบคลุม *ชั้นที่เราเขียนเอง* คือการหาค่านิ่งใน `spo2_monitor.py` (80%) โดยกำหนดค่าที่อัลกอริทึมคืนมาเป็นสคริปต์
+> `hrcalc.py` (8%) คืออัลกอริทึมคำนวณ HR/SpO2 จากผู้ผลิตเซนเซอร์ ใช้ตามต้นฉบับโดยไม่แก้ไข การทดสอบของเราจึงครอบคลุม *ชั้นที่เราเขียนเอง* คือการหาค่านิ่งและการวินิจฉัยสัญญาณใน `spo2_monitor.py` (86%) โดยกำหนดค่าที่อัลกอริทึมคืนมาเป็นสคริปต์
 
 ---
 
@@ -166,7 +161,7 @@ python -m pytest tests/ --cov=carekeeper_queue --cov=carekeeper_retry \
   --cov=carekeeper_providers --cov=carekeeper_logging --cov=lib \
   --cov-report=html && open htmlcov/index.html
 
-# แสดงรายชื่อกรณีทดสอบทั้ง 248 รายการ
+# แสดงรายชื่อกรณีทดสอบทั้ง 261 รายการ
 python -m pytest tests/ --collect-only -q
 ```
 

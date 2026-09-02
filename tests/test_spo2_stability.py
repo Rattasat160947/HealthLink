@@ -394,3 +394,140 @@ def test_an_ir_level_that_used_to_read_as_no_finger_now_counts(spo2_module, monk
     monitor = build(spo2_module, sensor)
 
     assert monitor.measure_spo2(on_progress=quiet) == 97
+
+
+# ── why a window was uncomputable ─────────────────────────────────────────
+
+def window(dc=80000, ac=800, samples=100):
+    """A plausible IR window: `ac` counts of pulse riding on `dc`."""
+    import math
+
+    return [int(dc + (ac / 2) * math.sin(2 * math.pi * i / 25)) for i in range(samples)]
+
+
+def test_a_healthy_window_is_not_blamed_on_the_finger(spo2_module):
+    """The classifier must stay quiet when the samples look fine -- otherwise
+    a beat lost to movement would tell the patient to press lighter."""
+    monitor = build(spo2_module, FakeSensor())
+    ir = window()
+    red = window(dc=40000, ac=400)
+
+    assert monitor.assess_signal(red, ir) is None
+    assert monitor.dominant_quality is None
+    assert monitor.last_perfusion > spo2_module.SpO2Monitor.MIN_PERFUSION_INDEX
+
+
+def test_clipped_samples_are_reported_as_saturation(spo2_module):
+    """Pressed hard against a 12.6 mA LED the ADC parks at 0x3FFFF: the DC
+    level looks excellent while the crests of the waveform are cut flat."""
+    monitor = build(spo2_module, FakeSensor())
+    ir = window(dc=260000, ac=8000)
+    red = window(dc=130000, ac=4000)
+
+    assert monitor.assess_signal(red, ir) == spo2_module.SpO2Monitor.QUALITY_SATURATED
+
+
+def test_a_dark_red_channel_is_reported_as_partial_contact(spo2_module):
+    """Red and IR sit side by side under one detector. A finger on one edge
+    covers IR -- which is all the contact check looks at -- and leaves red
+    shining into the room, so contact reads fine and the ratio is noise."""
+    monitor = build(spo2_module, FakeSensor())
+
+    quality = monitor.assess_signal(window(dc=900, ac=50), window())
+
+    assert quality == spo2_module.SpO2Monitor.QUALITY_PARTIAL_CONTACT
+    # the dark channel is kept for the log; last_ir_dc stays owned by the
+    # contact check, which is the only place that reads fresh samples
+    assert monitor.last_red_dc < 80000 * spo2_module.SpO2Monitor.MIN_RED_TO_IR_RATIO
+
+
+def test_a_flat_signal_is_reported_as_no_pulse(spo2_module):
+    """Squeezed capillaries (and a cold hand) leave the DC level healthy and
+    the pulsatile component gone -- the 'contact is fine, still no reading'
+    case that used to print the same 'weak signal' as everything else."""
+    monitor = build(spo2_module, FakeSensor())
+
+    quality = monitor.assess_signal(window(dc=40000, ac=0), window(dc=80000, ac=0))
+
+    assert quality == spo2_module.SpO2Monitor.QUALITY_NO_PULSE
+    assert monitor.last_perfusion == 0.0
+
+
+def test_a_single_spike_does_not_pass_as_a_pulse(spo2_module):
+    """min/max would read one knock as a healthy amplitude, so the amplitude
+    is measured between the 2nd and 98th percentile instead."""
+    monitor = build(spo2_module, FakeSensor())
+    ir = window(dc=80000, ac=0)
+    ir[50] = 120000
+
+    assert monitor.assess_signal(window(dc=40000, ac=0), ir) == \
+        spo2_module.SpO2Monitor.QUALITY_NO_PULSE
+
+
+def test_an_empty_window_is_not_classified(spo2_module):
+    monitor = build(spo2_module, FakeSensor())
+    assert monitor.assess_signal([], []) is None
+
+
+def test_the_dominant_cause_wins_not_the_last_one(spo2_module):
+    """The window that happens to land last is no more representative than any
+    other, so the message is decided by what was seen most."""
+    monitor = build(spo2_module, FakeSensor())
+    saturated = (window(dc=130000, ac=4000), window(dc=260000, ac=8000))
+    for _ in range(3):
+        monitor.assess_signal(*saturated)
+    monitor.assess_signal(window(dc=900, ac=50), window())
+
+    assert monitor.last_quality == spo2_module.SpO2Monitor.QUALITY_PARTIAL_CONTACT
+    assert monitor.dominant_quality == spo2_module.SpO2Monitor.QUALITY_SATURATED
+
+
+def test_uncomputable_windows_are_classified_during_a_run(spo2_module, monkeypatch):
+    """End to end: contact is good, the algorithm never computes, and the run
+    ends knowing it was the flat signal -- not just that it failed."""
+    sensor = FakeSensor()  # flat blocks: DC fine, no pulse at all
+    script_calc(monkeypatch, spo2_module, [None])
+    monitor = build(spo2_module, sensor, max_wait_seconds=0.15)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_WEAK
+    assert monitor.dominant_quality == spo2_module.SpO2Monitor.QUALITY_NO_PULSE
+
+
+def test_a_fifo_gap_is_recorded_as_its_own_cause(spo2_module, monkeypatch):
+    """A discarded window is not a weak signal -- the two used to print the
+    same line, which hid dropped samples behind 'place your finger better'."""
+    sensor = OverflowingSensor(overflow_after=(2,))
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert monitor.quality_counts[spo2_module.SpO2Monitor.QUALITY_FIFO_GAP] == 1
+
+
+def test_a_new_run_starts_from_a_clean_verdict(spo2_module, monkeypatch):
+    sensor = FakeSensor()
+    script_calc(monkeypatch, spo2_module, [None])
+    monitor = build(spo2_module, sensor, max_wait_seconds=0.15)
+    monitor.measure_spo2(on_progress=quiet)
+
+    script_calc(monkeypatch, spo2_module, [97])
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert monitor.quality_counts == {}
+
+
+def test_default_progress_names_the_cause(spo2_module, capsys):
+    """The printed line is the field-debugging path on the Pi, so it has to
+    carry the verdict; an unclassified window keeps the old wording."""
+    progress = spo2_module.SpO2Monitor.default_progress
+
+    progress(None, bpm=0, stable=False, finger_detected=True)
+    progress(None, bpm=0, stable=False, finger_detected=True,
+             quality=spo2_module.SpO2Monitor.QUALITY_SATURATED)
+    progress(None, bpm=0, stable=False, finger_detected=True,
+             quality=spo2_module.SpO2Monitor.QUALITY_NO_PULSE)
+    lines = capsys.readouterr().out.splitlines()
+
+    assert "weak signal" in lines[0]
+    assert "press lighter" in lines[1]
+    assert "cold hand" in lines[2]

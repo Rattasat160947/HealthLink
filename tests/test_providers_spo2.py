@@ -26,7 +26,8 @@ class _FakeMonitor:
     measure_spo2() is the settled reading (None = never stabilized); the
     settling itself is covered by tests/test_spo2_stability.py."""
 
-    def __init__(self, spo2=97, last_error=None, last_ir_dc=0, overflows=0):
+    def __init__(self, spo2=97, last_error=None, last_ir_dc=0, overflows=0,
+                 dominant_quality=None):
         self._spo2 = spo2
         self.m = SimpleNamespace(shutdown=lambda: None)
         self.calls = 0
@@ -36,6 +37,13 @@ class _FakeMonitor:
         self.last_ir_dc = last_ir_dc
         self.overflows = overflows
         self.finger_ir_threshold = 10000
+        # WEAK_SIGNAL alone does not say what to do about it; the monitor also
+        # classifies the raw window (assess_signal) and the provider turns
+        # that into the instruction.
+        self.dominant_quality = dominant_quality
+        self.last_red_dc = 41000
+        self.last_ir_ac = 90.0
+        self.last_perfusion = 0.11
 
     def measure_spo2(self, on_progress=None):
         self.calls += 1
@@ -193,6 +201,60 @@ def test_weak_signal_failure_is_its_own_message(provider, monkeypatch):
         provider.measure_spo2()
 
     assert "อ่อนเกินไป" in str(excinfo.value)
+
+
+def test_weak_signal_failure_carries_the_signal_numbers(provider, monkeypatch):
+    """Which threshold in spo2_monitor.py was missed, and by how much -- the
+    IR level alone cannot tell clipping from a flat signal."""
+    monitor = _FakeMonitor(spo2=None, last_error="WEAK_SIGNAL", last_ir_dc=52000)
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    message = str(excinfo.value)
+    assert "IR=52000" in message and "RED=41000" in message
+    assert "PI=0.11%" in message
+
+
+@pytest.mark.parametrize(
+    "quality, expected",
+    [
+        ("SATURATED", "แตะเบาๆ"),
+        ("NO_PULSE", "มือเย็น"),
+        ("PARTIAL_CONTACT", "กลางเซนเซอร์"),
+        ("FIFO_GAP", "ขาดช่วง"),
+    ],
+)
+def test_a_classified_weak_signal_says_what_to_do_about_it(
+    provider, monkeypatch, quality, expected
+):
+    """"Press lighter" and "cover more of the sensor" are opposite
+    instructions; the generic weak-signal wording asked the patient to guess
+    between them."""
+    monitor = _FakeMonitor(spo2=None, last_error="WEAK_SIGNAL", dominant_quality=quality)
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    message = str(excinfo.value)
+    assert expected in message
+    assert "อ่อนเกินไป" not in message  # replaced, not appended to
+
+
+def test_a_classified_window_does_not_overrule_a_no_finger_failure(provider, monkeypatch):
+    """A stray classified window during a run that never saw contact must not
+    turn "no finger" into advice about how hard to press."""
+    monitor = _FakeMonitor(
+        spo2=None, last_error="NO_FINGER", last_ir_dc=7400, dominant_quality="NO_PULSE"
+    )
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    assert "ไม่พบนิ้ว" in str(excinfo.value)
 
 
 def test_discarded_fifo_gaps_are_reported(provider, monkeypatch):

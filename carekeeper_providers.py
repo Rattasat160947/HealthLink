@@ -511,6 +511,17 @@ class RealCareKeeperProvider(CareKeeperProvider):
         "UNSTABLE": "ค่า SpO2 ยังไม่นิ่ง (อยู่นิ่งๆ อย่าขยับนิ้วระหว่างวัด)",
     }
 
+    # WEAK_SIGNAL only says the algorithm got nothing; the monitor also
+    # classifies WHY from the raw window, and the four causes need different
+    # -- in the case of the first two, opposite -- things from the person on
+    # the sensor, so each gets its own instruction instead of the catch-all.
+    _SPO2_QUALITY_MESSAGES = {
+        "SATURATED": "แสงเซนเซอร์อิ่มตัว (กดนิ้วแน่นเกินไป) กรุณาวางนิ้วแตะเบาๆ อย่ากดลงบนเซนเซอร์",
+        "NO_PULSE": "ไม่พบจังหวะชีพจรในสัญญาณ (กดนิ้วแรงเกินไป หรือมือเย็น/เลือดไหลเวียนน้อย) กรุณาวางนิ้วเบาๆ และอุ่นมือก่อนวัดใหม่",
+        "PARTIAL_CONTACT": "นิ้ววางไม่ตรงกลางเซนเซอร์ กรุณาวางนิ้วให้คลุมทั้งไฟและตัวรับแสง (วางกลางหน้าเซนเซอร์ ไม่วางเฉียง)",
+        "FIFO_GAP": "อ่านสัญญาณจากเซนเซอร์ไม่ทัน ทำให้สัญญาณขาดช่วง กรุณาวัดใหม่อีกครั้ง",
+    }
+
     def measure_spo2(self) -> int:
         # SpO2 comes from a MAX30102 over I2C. Only OPENING the sensor is
         # retried/disabled (a real hardware
@@ -562,13 +573,29 @@ class RealCareKeeperProvider(CareKeeperProvider):
         absent is how a mis-tuned FINGER_IR_THRESHOLD presents -- that number
         is what CAREKEEPER_SPO2_FINGER_IR_THRESHOLD gets set against."""
         reason = getattr(monitor, "last_error", None)
+        quality = getattr(monitor, "dominant_quality", None)
         message = self._SPO2_ERROR_MESSAGES.get(
             reason, "อ่านค่า SpO2 ไม่สำเร็จ (วางนิ้วให้แนบเซนเซอร์แล้วอยู่นิ่งๆ)"
         )
+        # A classified cause replaces the generic wording, but only for
+        # WEAK_SIGNAL: "no finger" and "never settled" are already specific,
+        # and a stray classified window during either of those must not
+        # overrule what actually went wrong.
+        if reason == "WEAK_SIGNAL" and quality in self._SPO2_QUALITY_MESSAGES:
+            message = self._SPO2_QUALITY_MESSAGES[quality]
         ir_dc = getattr(monitor, "last_ir_dc", None)
         if reason == "NO_FINGER" and ir_dc is not None:
             threshold = getattr(monitor, "finger_ir_threshold", None)
             message += f" [IR={ir_dc}/{threshold}]"
+        elif reason == "WEAK_SIGNAL":
+            # The numbers behind the verdict, for the kiosk log: which of the
+            # thresholds in spo2_monitor.py was missed, and by how much.
+            message += " [IR={} RED={} AC={:.0f} PI={:.2f}%]".format(
+                ir_dc,
+                getattr(monitor, "last_red_dc", 0),
+                getattr(monitor, "last_ir_ac", 0.0),
+                getattr(monitor, "last_perfusion", 0.0),
+            )
         overflows = getattr(monitor, "overflows", 0)
         if overflows:
             message += f" (สัญญาณขาดช่วง {overflows} ครั้ง)"

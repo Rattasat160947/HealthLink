@@ -78,6 +78,32 @@ def test_spo2_without_finger_shows_thai_placement_instruction(window):
     assert "กรุณาวางนิ้วให้แนบเต็มเซนเซอร์" in window.lbl_system_message.text()
 
 
+def test_spo2_live_hint_names_the_signal_problem(window):
+    """The monitor classifies why a window was uncomputable; while the finger
+    is still on the sensor is the only moment that advice can change the
+    outcome, so it goes on screen instead of "reading the signal"."""
+    window._measure_spo2()
+    window._on_measurement_progress(
+        "spo2",
+        None,
+        {"bpm": 0, "stable": False, "finger_detected": True, "quality": "SATURATED"},
+    )
+
+    assert window.spo2_measurement_popup.message == "กดเบาลง"
+    assert "กดนิ้วแรงเกินไป" in window.lbl_system_message.text()
+
+
+def test_spo2_live_hint_falls_back_when_the_window_is_not_classified(window):
+    """A window that simply did not compute keeps the neutral wording -- no
+    guessing at a cause the samples do not support."""
+    window._measure_spo2()
+    window._on_measurement_progress(
+        "spo2", None, {"bpm": 0, "stable": False, "finger_detected": True}
+    )
+
+    assert window.spo2_measurement_popup.message == "กำลังอ่านสัญญาณ"
+
+
 def test_temperature_popup_stays_up_for_samples_then_final_value_is_kept(window, qtbot):
     window._measure_temperature()
 

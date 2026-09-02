@@ -859,6 +859,16 @@ class CareKeeperWindow(QMainWindow):
             self.temp_live_display.stop()
             self.lbl_temp_value.setText("--")
 
+    # (popup line, status-bar line) per QUALITY_* code from the SpO2 monitor.
+    # The popup is a few words -- it sits over the reading -- while the status
+    # bar carries the actual instruction.
+    _SPO2_LIVE_HINTS = {
+        "SATURATED": ("กดเบาลง", "กดนิ้วแรงเกินไป กรุณาวางแตะเบาๆ อย่ากดลงบนเซนเซอร์"),
+        "NO_PULSE": ("กดเบาลง / อุ่นมือ", "ไม่พบจังหวะชีพจร กรุณาวางนิ้วเบาๆ ถ้ามือเย็นให้อุ่นมือก่อน"),
+        "PARTIAL_CONTACT": ("วางให้ตรงกลาง", "วางนิ้วให้อยู่กลางเซนเซอร์ คลุมทั้งไฟและตัวรับแสง"),
+        "FIFO_GAP": ("สัญญาณขาดช่วง", "สัญญาณขาดช่วง กรุณาวางนิ้วนิ่งๆ ต่อไป"),
+    }
+
     def _on_measurement_progress(self, kind: str, value: object, state: object) -> None:
         if kind not in self.measurement_active or not self.measurement_active[kind]:
             return
@@ -875,8 +885,14 @@ class CareKeeperWindow(QMainWindow):
                 self.spo2_measurement_popup.set_message("วางนิ้วให้แนบเซนเซอร์")
                 self._set_system_message("กรุณาวางนิ้วให้แนบเต็มเซนเซอร์", success=None)
             elif value is None:
-                self.spo2_measurement_popup.set_message("กำลังอ่านสัญญาณ")
-                self._set_system_message("กำลังอ่านสัญญาณ กรุณาวางนิ่งไว้", success=None)
+                # The monitor classifies why a window was uncomputable; saying
+                # it while the finger is still on the sensor is the only
+                # moment the advice can still change the outcome.
+                hint = self._SPO2_LIVE_HINTS.get(details.get("quality"))
+                self.spo2_measurement_popup.set_message(hint[0] if hint else "กำลังอ่านสัญญาณ")
+                self._set_system_message(
+                    hint[1] if hint else "กำลังอ่านสัญญาณ กรุณาวางนิ่งไว้", success=None
+                )
             else:
                 self.spo2_measurement_popup.set_message("กำลังวัดออกซิเจน")
                 self._set_system_message("ค่ากำลังเปลี่ยน กรุณารอจนกว่าจะนิ่ง", success=None)

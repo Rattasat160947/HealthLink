@@ -61,6 +61,52 @@ class SpO2Monitor():
     ERR_UNSTABLE  = "UNSTABLE"     # had contact, readings never agreed
     ERR_WEAK      = "WEAK_SIGNAL"  # had contact, algorithm never got a value
 
+    # ── why a window was uncomputable ────────────────────────────────────
+    # "Finger on the sensor but no value" has several causes, and the fix for
+    # each is a different -- sometimes opposite -- instruction to the person
+    # being measured: press LIGHTER, or cover MORE of the sensor, or warm the
+    # hand. One catch-all "weak signal" asked them to guess, so every failed
+    # window is classified against the raw samples instead.
+    QUALITY_SATURATED       = "SATURATED"        # ADC clipped: peaks cut flat
+    QUALITY_PARTIAL_CONTACT = "PARTIAL_CONTACT"  # one LED path uncovered
+    QUALITY_NO_PULSE        = "NO_PULSE"         # DC fine, no pulsatile AC
+    QUALITY_FIFO_GAP        = "FIFO_GAP"         # samples dropped mid-window
+
+    # Field-debugging text for each, printed by default_progress(). The Thai
+    # wording the kiosk shows lives in carekeeper_providers.py, like every
+    # other operator-facing message.
+    QUALITY_HINTS = {
+        QUALITY_SATURATED:       "signal saturated -- press lighter / lower LED current",
+        QUALITY_PARTIAL_CONTACT: "finger off-centre -- cover both LEDs and the detector",
+        QUALITY_NO_PULSE:        "no pulse in the signal -- pressing too hard, or cold hand",
+        QUALITY_FIFO_GAP:        "samples dropped, window discarded",
+    }
+
+    # 18-bit samples (LED_PW = 411 us in max30102.py's SPO2_CONFIG), so a
+    # reading tops out at 0x3FFFF. With DEFAULT_LED_CURRENT at its 12.6 mA
+    # maximum a firmly pressed finger can park the ADC there: the DC level
+    # then looks excellent while the crests of the pulse waveform are cut
+    # flat, leaving find_peaks() nothing to find.
+    ADC_FULL_SCALE = 0x3FFFF
+    SATURATION_LEVEL = int(ADC_FULL_SCALE * 0.98)
+    # A lone clipped sample is noise; 1% of the window is clipping.
+    SATURATION_SAMPLE_FRACTION = 0.01
+
+    # Red and IR are two LEDs side by side under one detector, so a finger
+    # covering the window lights both: red DC sits lower than IR (haemoglobin
+    # absorbs red) but stays the same order of magnitude. A finger resting on
+    # one edge covers one LED and leaves the other shining into the room --
+    # that reads as solid contact on IR while the red/IR ratio the SpO2 maths
+    # is built on comes out of noise.
+    MIN_RED_TO_IR_RATIO = 0.10
+
+    # Perfusion index: pulsatile amplitude as a percentage of the DC level.
+    # A finger resting on the sensor gives roughly 0.5-5%. Pressing hard
+    # enough to squeeze the capillaries empty -- and a cold hand -- drive it
+    # towards zero while the DC level stays perfectly healthy, which is
+    # exactly the "contact is fine, still no reading" case.
+    MIN_PERFUSION_INDEX = 0.15
+
     def __init__(self, sensor=None, stability_window=5, stability_threshold=3.0,
                  max_wait_seconds=60, finger_ir_threshold=None):
         self.bpm = 0
@@ -75,6 +121,11 @@ class SpO2Monitor():
         self.last_error = None      # one of the ERR_* codes after a failure
         self.last_ir_dc = 0         # IR DC level last seen, for calibration
         self.overflows = 0          # FIFO gaps discarded during the last run
+        self.last_quality = None    # QUALITY_* code of the last failed window
+        self.quality_counts = {}    # how often each QUALITY_* code was seen
+        self.last_red_dc = 0        # red DC level, for the coverage check
+        self.last_ir_ac = 0.0       # pulsatile amplitude of the last window
+        self.last_perfusion = 0.0   # that amplitude as a % of the DC level
         self._red = []
         self._ir = []
 
@@ -105,6 +156,62 @@ class SpO2Monitor():
             return False
         self.last_ir_dc = int(np.mean(ir))
         return self.last_ir_dc >= self.finger_ir_threshold
+
+    def _record_quality(self, quality):
+        """Remember a window's verdict. The counts, not just the last one,
+        decide the final message: the window that happened to land last is no
+        more representative than any other, and a run that spent 25 s clipped
+        and one window off-centre should say "press lighter"."""
+        self.last_quality = quality
+        if quality is not None:
+            self.quality_counts[quality] = self.quality_counts.get(quality, 0) + 1
+        return quality
+
+    @property
+    def dominant_quality(self):
+        """The QUALITY_* code seen most often during the last run, or None."""
+        if not self.quality_counts:
+            return None
+        return max(self.quality_counts, key=self.quality_counts.get)
+
+    def assess_signal(self, red, ir):
+        """Say WHY calc_hr_and_spo2() could not compute this window.
+
+        Returns a QUALITY_* code, or None when the raw signal looks usable and
+        the failure was the algorithm's own (a beat lost to movement, a ratio
+        outside its calibration range) rather than something the person on the
+        sensor can do anything about.
+
+        The checks are ordered by what invalidates what: clipping makes the
+        amplitude meaningless, and an uncovered LED makes both channels
+        meaningless, so those are decided before the pulse is judged."""
+        ir_arr = np.asarray(ir, dtype=float)
+        red_arr = np.asarray(red, dtype=float)
+        if ir_arr.size == 0:
+            return self._record_quality(None)
+
+        ir_dc = float(ir_arr.mean())
+        red_dc = float(red_arr.mean()) if red_arr.size else 0.0
+        # 2nd/98th percentile rather than min/max: a single spike from the
+        # sensor being knocked would otherwise pass as a healthy pulse.
+        low, high = np.percentile(ir_arr, (2, 98))
+        self.last_red_dc = int(red_dc)
+        self.last_ir_ac = float(high - low)
+        self.last_perfusion = (100.0 * self.last_ir_ac / ir_dc) if ir_dc else 0.0
+
+        clipped = int(
+            np.count_nonzero(ir_arr >= self.SATURATION_LEVEL)
+            + np.count_nonzero(red_arr >= self.SATURATION_LEVEL)
+        )
+        clip_limit = max(1, int(self.SATURATION_SAMPLE_FRACTION * ir_arr.size))
+
+        if clipped >= clip_limit:
+            return self._record_quality(self.QUALITY_SATURATED)
+        if red_dc < ir_dc * self.MIN_RED_TO_IR_RATIO:
+            return self._record_quality(self.QUALITY_PARTIAL_CONTACT)
+        if self.last_perfusion < self.MIN_PERFUSION_INDEX:
+            return self._record_quality(self.QUALITY_NO_PULSE)
+        return self._record_quality(None)
 
     def _fifo_overflowed(self):
         """True if the sensor dropped samples since the last check, meaning the
@@ -156,11 +263,16 @@ class SpO2Monitor():
         self._ir = []
 
     @staticmethod
-    def default_progress(spo2, bpm=0, stable=False, finger_detected=True):
+    def default_progress(spo2, bpm=0, stable=False, finger_detected=True,
+                         quality=None):
         if not finger_detected:
             print("  --  --> Fail - Place a finger on the sensor and keep it still !!!")
         elif spo2 is None:
-            print("  --  (weak signal, measuring...)")
+            # `quality` names the specific problem when the window could be
+            # classified; "weak signal" stays the wording for the windows that
+            # look fine and simply did not compute.
+            hint = SpO2Monitor.QUALITY_HINTS.get(quality, "weak signal")
+            print(f"  --  ({hint}, measuring...)")
         else:
             status = "stable" if stable else "measuring..."
             print(f"  SpO2 {spo2}%  BPM {bpm}  ({status})")
@@ -186,6 +298,8 @@ class SpO2Monitor():
         self._clear_window()
         self.last_error = self.ERR_NO_FINGER
         self.overflows = 0
+        self.last_quality = None
+        self.quality_counts = {}
         start = time.time()
 
         while time.time() - start < self.max_wait_seconds:
@@ -222,8 +336,10 @@ class SpO2Monitor():
                 readings.clear()
                 pulses.clear()
                 self._clear_window()
+                self._record_quality(self.QUALITY_FIFO_GAP)
                 if on_progress:
-                    on_progress(None, bpm=0, stable=False, finger_detected=True)
+                    on_progress(None, bpm=0, stable=False, finger_detected=True,
+                                quality=self.QUALITY_FIFO_GAP)
                 continue
 
             if len(ir) < self.WINDOW_SAMPLES:
@@ -235,9 +351,13 @@ class SpO2Monitor():
             if not sp_valid or not (self.MIN_VALID_SPO2 <= sp <= self.MAX_VALID_SPO2):
                 # One unusable window (motion artifact / weak perfusion): skip
                 # it but keep what we already have. If the value really moved,
-                # the spread check below rejects the window anyway.
+                # the spread check below rejects the window anyway. First ask
+                # the raw samples WHY it was unusable, so a run that never
+                # settles can end with an instruction instead of a shrug.
+                quality = self.assess_signal(red, ir)
                 if on_progress:
-                    on_progress(None, bpm=bpm, stable=False, finger_detected=True)
+                    on_progress(None, bpm=bpm, stable=False, finger_detected=True,
+                                quality=quality)
                 continue
 
             # The algorithm produced a usable value, so any failure from here
@@ -297,7 +417,16 @@ def main_raw():
         # between the two levels you see.
         ir_dc = int(np.mean(ir)) if len(ir) else 0
         contact = "finger" if ir_dc >= SpO2_Sensor.finger_ir_threshold else "NO finger"
-        print("BPM: {}, SpO2: {}, IR dc: {} ({})".format(bpm, spo2, ir_dc, contact))
+        # The same classification the settling loop uses, so the cause of a
+        # run that never settles can be watched live: DC alone says nothing
+        # about clipping, coverage or perfusion, which is what actually
+        # decides whether the algorithm can compute anything.
+        quality = SpO2_Sensor.assess_signal(red, ir)
+        print("BPM: {}, SpO2: {}, IR dc: {} ({}), red dc: {}, AC: {:.0f}, "
+              "perfusion: {:.2f}% -- {}".format(
+                  bpm, spo2, ir_dc, contact, SpO2_Sensor.last_red_dc,
+                  SpO2_Sensor.last_ir_ac, SpO2_Sensor.last_perfusion,
+                  SpO2_Sensor.QUALITY_HINTS.get(quality, "signal looks usable")))
         time.sleep(LOOP_TIME)
 
 
