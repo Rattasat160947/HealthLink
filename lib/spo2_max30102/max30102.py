@@ -151,6 +151,23 @@ class MAX30102():
     def clear_overflow_count(self):
         self.bus.write_i2c_block_data(self.address, REG_OVF_COUNTER, [0x00])
 
+    def reset_fifo(self):
+        """Throw away everything the FIFO holds and clear the overflow count.
+
+        The chip samples continuously from setup() onwards, and with rollover
+        off the 32-deep FIFO fills in 1.28 s at the 25 Hz output rate. So by
+        the time a caller actually starts measuring, the buffer is already
+        full of samples taken before the finger arrived AND the overflow
+        counter is already set -- which is why the first window of every
+        measurement used to be built from stale data and then discarded by
+        the overflow check anyway.
+
+        Zeroing all three pointers together is the datasheet's way of
+        starting a fresh acquisition; the same three writes setup() does."""
+        self.bus.write_i2c_block_data(self.address, REG_FIFO_WR_PTR, [0x00])
+        self.bus.write_i2c_block_data(self.address, REG_OVF_COUNTER, [0x00])
+        self.bus.write_i2c_block_data(self.address, REG_FIFO_RD_PTR, [0x00])
+
     def read_fifo(self):
         """
         This function will read the data register.

@@ -114,7 +114,11 @@ def test_keeps_measuring_until_the_values_agree(spo2_module, monkeypatch):
     monitor = build(spo2_module, sensor)
 
     assert monitor.measure_spo2(on_progress=quiet) == 97
-    assert calls["n"] == 7  # not 1: it did not stop at the first valid value
+    # Six, not seven: by the sixth window the outlying 90 has slid out and the
+    # remaining spread is within threshold once the one deviant reading is
+    # trimmed (see _trimmed_spread). Not one -- it still did not stop at the
+    # first valid value, which is what this test exists to hold.
+    assert calls["n"] == 6
 
 
 def test_out_of_range_and_uncomputable_windows_are_skipped(spo2_module, monkeypatch):
@@ -295,7 +299,11 @@ def test_a_window_spanning_a_fifo_gap_is_discarded(spo2_module, monkeypatch):
     # must fill from scratch rather than slide over the seam
     assert sensor.requested[:3] == [100, 25, 100]
     assert monitor.overflows == 1
-    assert sensor.cleared == 1
+    # At least once, not exactly once: clearing the window now also empties
+    # the sensor's FIFO (see _reset_fifo), which clears the counter on this
+    # older fake as well. What matters is that the gap is not left standing to
+    # condemn the window read after it.
+    assert sensor.cleared >= 1
 
 
 def test_a_clean_run_reports_no_gaps(spo2_module, monkeypatch):
@@ -305,6 +313,71 @@ def test_a_clean_run_reports_no_gaps(spo2_module, monkeypatch):
 
     assert monitor.measure_spo2(on_progress=quiet) == 97
     assert monitor.overflows == 0
+
+
+class BufferingSensor(FakeSensor):
+    """FakeSensor whose FIFO is already full and overflowing before the run.
+
+    This is the state a real MAX30102 is always in by the time a measurement
+    starts: it samples continuously from setup(), and with rollover off its
+    32-deep FIFO fills in 1.28 s -- while the provider is still constructing
+    the monitor and the person is still being told to place a finger."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.overflowing = True   # stale, from the idle time before the run
+        self.fifo_resets = 0
+
+    def get_overflow_count(self):
+        return 7 if self.overflowing else 0
+
+    def clear_overflow_count(self):
+        self.overflowing = False
+
+    def reset_fifo(self):
+        self.fifo_resets += 1
+        self.overflowing = False
+
+
+def test_a_stale_overflow_does_not_cost_the_first_window(spo2_module, monkeypatch):
+    """An overflow that happened before the measurement began says nothing
+    about the samples read after it.
+
+    Without emptying the FIFO first, the first window of EVERY run was built
+    from samples taken before the finger arrived and was then discarded on the
+    strength of that idle overflow -- ~4 s of a 30 s budget, gone every time,
+    before the person on the sensor had done anything wrong."""
+    sensor = BufferingSensor()
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert sensor.fifo_resets >= 1   # emptied before the first read
+    assert monitor.overflows == 0    # so no window was thrown away
+    assert sensor.requested == [100, 25, 25, 25, 25]  # filled once, then slid
+
+
+def test_one_artifact_window_does_not_block_a_settled_run(spo2_module, monkeypatch):
+    """91 among four 97s is a swallow or a knuckle shifting, not a real move:
+    it is inside the physiological range so it enters the window, and on the
+    raw max-min it would hold the run up for another five seconds."""
+    sensor = FakeSensor()
+    calls = script_calc(monkeypatch, spo2_module, [97, 97, 91, 97, 97])
+    monitor = build(spo2_module, sensor)
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert calls["n"] == 5
+
+
+def test_trimming_does_not_forgive_a_second_deviant_window(spo2_module):
+    """Trimming one reading must not turn "the value keeps moving" into a
+    result. One window off among four that agree is an artifact; two is a
+    signal that has not settled, and the spread still has to say so."""
+    trim = spo2_module.SpO2Monitor._trimmed_spread
+
+    assert trim([97, 97, 91, 97, 97]) <= 3.0   # one artifact -- forgiven
+    assert trim([92, 98, 92, 98, 92]) > 3.0    # swinging every window
+    assert trim([97, 91, 97, 91, 97]) > 3.0
 
 
 def test_sensors_without_an_overflow_counter_still_work(spo2_module, monkeypatch):

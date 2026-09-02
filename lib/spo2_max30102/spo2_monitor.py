@@ -258,9 +258,58 @@ class SpO2Monitor():
         self._ir = (self._ir + list(ir))[-self.WINDOW_SAMPLES:]
         return self._red, self._ir, list(ir)
 
+    def _reset_fifo(self):
+        """Drop the samples the sensor buffered while we were not reading.
+
+        Clearing the window in software is only half of it: the MAX30102 has
+        been sampling into its own 32-deep FIFO the whole time, which is just
+        1.28 s at 25 Hz with rollover off. Everything between opening the
+        sensor and the first window -- and everything spent computing a window
+        that was then discarded -- has already filled that buffer and left the
+        overflow counter set.
+
+        Two things followed from not doing this. The first window of every run
+        was built partly from samples taken before the finger was even on the
+        sensor, and _fifo_overflowed() then discarded it on the strength of an
+        overflow that happened while the kiosk was idle -- so ~4 s of a 30 s
+        budget went every single run, before the person being measured had
+        done anything wrong.
+
+        getattr-guarded because injected/fake sensors need not model a FIFO."""
+        reset = getattr(self.m, "reset_fifo", None)
+        if reset is None:
+            # Older driver: at least clear the counter so a stale overflow
+            # does not condemn the window we are about to fill.
+            reset = getattr(self.m, "clear_overflow_count", None)
+        if reset is None:
+            return
+        try:
+            reset()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _trimmed_spread(values):
+        """Spread of the window ignoring its single most deviant reading.
+
+        The algorithm recomputes SpO2 from scratch per window, and one window
+        in a run routinely lands a few points off while still inside the
+        70-100 range that would have rejected it outright -- a swallow of
+        breath, a knuckle shifting. On the raw max-min that one window blocks
+        stability for `stability_window` more seconds, and every second spent
+        is one the finger has to stay still for. What the caller receives is
+        the median of the FULL window either way, and one outlier cannot move
+        a median."""
+        if len(values) < 3:
+            return max(values) - min(values) if values else 0.0
+        middle = statistics.median(values)
+        kept = sorted(values, key=lambda v: abs(v - middle))[:-1]
+        return max(kept) - min(kept)
+
     def _clear_window(self):
         self._red = []
         self._ir = []
+        self._reset_fifo()
 
     @staticmethod
     def default_progress(spo2, bpm=0, stable=False, finger_detected=True,
@@ -372,7 +421,7 @@ class SpO2Monitor():
 
             stable = (
                 len(readings) == self.stability_window
-                and (max(readings) - min(readings)) <= self.stability_threshold
+                and self._trimmed_spread(readings) <= self.stability_threshold
             )
 
             if on_progress:

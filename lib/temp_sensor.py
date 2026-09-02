@@ -4,12 +4,31 @@ import statistics
 
 
 class temp_sensor:
-    # valid temperature range
-    MIN_VALID_TEMP = 34.0
+    # Valid skin-contact range. The floor is NOT body temperature: this is a
+    # contact probe held against the skin, which reads a few degrees under
+    # core -- roughly 33-36 C before calibration_offset is added. A floor of
+    # 34.0 sat right on top of that band, so an ordinary reading landing one
+    # step low counted as "probe not touching skin" and threw the whole
+    # settling window away. 32.0 clears the skin band while still rejecting
+    # room temperature, which is what the check is actually for.
+    MIN_VALID_TEMP = 32.0
     MAX_VALID_TEMP = 43.0
 
+    # A DS18B20 at its default 12-bit resolution quantises to 0.0625 C per
+    # step, so a stability threshold BELOW that cannot mean "the reading is
+    # steady" -- it can only mean "every sample came back bit-identical",
+    # which a probe still warming towards the skin rarely manages. The old
+    # default of 0.05 was such a threshold, and it is the reason a
+    # measurement settled on some attempts and ran the clock out on others.
+    SENSOR_RESOLUTION = 0.0625
+
+    # Consecutive failed reads that mean the device itself is gone (unplugged
+    # probe, w1 module not loaded) rather than one corrupt frame. Below this,
+    # a failure is skipped and the measurement carries on.
+    MAX_CONSECUTIVE_READ_ERRORS = 3
+
     def __init__(self, sensor_id=None, calibration_offset=1.0,
-                 stability_window=5, stability_threshold=0.05,
+                 stability_window=5, stability_threshold=0.2,
                  max_wait_seconds=60, poll_interval=0.05):
         if sensor_id is None:
             devices = glob.glob("/sys/bus/w1/devices/28-*")
@@ -25,6 +44,9 @@ class temp_sensor:
         self.stability_threshold = stability_threshold
         self.max_wait_seconds = max_wait_seconds
         self.poll_interval = poll_interval
+        # Corrupt 1-Wire frames skipped during the last measurement. Zero on a
+        # healthy bus; a rising count is the symptom of a long or noisy cable.
+        self.read_errors = 0
 
     def _read_raw(self):
         with open(self.device_file, "r") as f:
@@ -55,15 +77,55 @@ class temp_sensor:
             status = "stable" if stable else "measuring..."
             print(f"  {temp:.2f}°C  ({status})")
 
+    @staticmethod
+    def _trimmed_spread(values):
+        """Spread of the window ignoring its single most deviant reading.
+
+        The 1-Wire conversion occasionally lands a quantisation step away from
+        its neighbours for one sample. Judging stability on the raw max-min
+        lets that one sample hold up a window that has otherwise settled, and
+        each conversion costs ~750 ms inside the kernel -- so only about 35 of
+        them fit in the timeout, and a window rejected over a single outlier
+        is a real share of the whole budget. The value returned to the caller
+        is still the median of the FULL window, which one outlier cannot move
+        either way."""
+        if len(values) < 3:
+            return max(values) - min(values) if values else 0.0
+        middle = statistics.median(values)
+        kept = sorted(values, key=lambda v: abs(v - middle))[:-1]
+        return max(kept) - min(kept)
+
     def measure_body_temperature(self, on_progress=None):
         if on_progress is None:
             on_progress = self.default_progress
 
         readings = []
+        self.read_errors = 0
+        consecutive_errors = 0
         start = time.time()
 
         while time.time() - start < self.max_wait_seconds:
-            temp = self.read_celsius_once()
+            try:
+                temp = self.read_celsius_once()
+            except Exception:
+                # One corrupt 1-Wire frame is not a failed measurement: the
+                # bus recovers by itself and the next conversion is usually
+                # clean. Aborting the whole run on it turned a momentary
+                # glitch into "วัดอุณหภูมิไม่สำเร็จ" for the operator, so the
+                # sample is skipped and the clock keeps running instead. The
+                # window is deliberately NOT cleared -- a bad frame says
+                # nothing about whether the probe is still on the skin.
+                #
+                # Several in a row is a different story (probe unplugged, w1
+                # module gone), and that must surface as the hardware error it
+                # is rather than as "hold still" for the rest of the timeout.
+                self.read_errors += 1
+                consecutive_errors += 1
+                if consecutive_errors >= self.MAX_CONSECUTIVE_READ_ERRORS:
+                    raise
+                time.sleep(self.poll_interval)
+                continue
+            consecutive_errors = 0
 
             if not self.is_probe_in_contact(temp):
                 readings.clear()
@@ -78,7 +140,7 @@ class temp_sensor:
 
             stable = (
                 len(readings) == self.stability_window
-                and (max(readings) - min(readings)) <= self.stability_threshold
+                and self._trimmed_spread(readings) <= self.stability_threshold
             )
 
             if on_progress:
