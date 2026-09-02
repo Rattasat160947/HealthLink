@@ -2481,12 +2481,10 @@ class CareKeeperWindow(QMainWindow):
             # dating it on arrival would file the reading under the wrong
             # time entirely.
             "measured_at": self._measured_at().strftime(self.MEASURED_AT_FORMAT),
-            "spo2": self.vitals.spo2,
-            "heart_rate": self.vitals.pulse,
-            "pr_bpm": self.vitals.pulse,
             "sys": self.vitals.systolic,
             "dia": self.vitals.diastolic,
             "pulse": self.vitals.pulse,
+            "spo2": self.vitals.spo2,
             # Measured, shown on screen, and required before the submit
             # button unlocks -- but until now never actually sent. The
             # backend has had a place for it all along: the history reader

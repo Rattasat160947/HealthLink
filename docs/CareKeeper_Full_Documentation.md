@@ -454,17 +454,20 @@ Python มี Global Interpreter Lock (GIL) ทำให้ multi-thread ไม�
 ```json
 {
   "mac": "1c:ce:51:9a:34:77",
-  "spo2": 98,
-  "heart_rate": 70,
-  "pr_bpm": 70,
+  "patient_id": "1234567890123",
+  "measured_at": "2026-09-01 20:15:33",
   "sys": 120,
   "dia": 78,
-  "pulse": 70
+  "pulse": 70,
+  "spo2": 98,
+  "temperature": 36.5
 }
 ```
 
 - `mac` อ่านจากเครื่องจริงอัตโนมัติ ไม่ต้องตั้งค่าใน `.env`
-- `heart_rate`, `pr_bpm`, `pulse` ใช้ค่าชีพจรชุดเดียวกันตามรูปแบบ API ปัจจุบัน (backend ต้องการ 3 field แต่ค่าตรงกัน)
+- `patient_id` คือเลขบัตรประชาชนที่กรองให้เหลือเฉพาะตัวเลข
+- `measured_at` คือเวลาที่วัดเสร็จ รูปแบบ `YYYY-MM-DD HH:MM:SS`
+- `temperature` ส่งเป็นเลขทศนิยมหนึ่งตำแหน่ง หรือ `null` เมื่อไม่มีค่า
 
 \newpage
 

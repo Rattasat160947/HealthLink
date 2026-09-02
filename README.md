@@ -527,17 +527,20 @@ journalctl -u carekeeper.service -f
 ```json
 {
   "mac": "1c:ce:51:9a:34:77",
-  "spo2": 98,
-  "heart_rate": 70,
-  "pr_bpm": 70,
+  "patient_id": "1234567890123",
+  "measured_at": "2026-09-01 20:15:33",
   "sys": 120,
   "dia": 78,
-  "pulse": 70
+  "pulse": 70,
+  "spo2": 98,
+  "temperature": 36.5
 }
 ```
 
 - `mac` อ่านจาก Raspberry Pi อัตโนมัติ ใช้ระบุว่าข้อมูลมาจากเครื่องไหน
-- `heart_rate`, `pr_bpm`, `pulse` ใช้ค่าชีพจรชุดเดียวกันตามรูปแบบ API ปัจจุบัน
+- `patient_id` คือเลขบัตรประชาชนที่กรองให้เหลือเฉพาะตัวเลข
+- `measured_at` คือเวลาที่วัดเสร็จ รูปแบบ `YYYY-MM-DD HH:MM:SS`
+- `temperature` ส่งเป็นเลขทศนิยมหนึ่งตำแหน่ง หรือ `null` เมื่อไม่มีค่า
 - HTTP 2xx = สำเร็จ · 401/500 = โยน error แล้วเข้า offline queue
 
 ดึงข้อมูลย้อนหลัง: `GET` พร้อม `patient_id`, `mac`, `limit=4` — ฝั่งแอปรองรับหลายรูปแบบ response (`data` / `records` / `history` / array ตรง ๆ) และ map ชื่อฟิลด์ให้ยืดหยุ่น (`sys`/`systolic`, `pulse`/`pr_bpm`/`heart_rate`) เพื่อไม่ให้พังเมื่อ Backend ปรับ schema เล็กน้อย

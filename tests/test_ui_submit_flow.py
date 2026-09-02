@@ -46,6 +46,24 @@ def test_submit_data_success_path_clears_queue_row(window, qtbot):
     assert window.provider.sent_payloads[0]["mac"] == window.provider.device_mac
 
 
+def test_submit_payload_uses_backend_contract_keys_only(window, qtbot):
+    _set_full_vitals(window)
+    window.vitals.temperature = 36.5
+
+    window._submit_data()
+
+    assert set(_sent_payload(window, qtbot)) == {
+        "mac",
+        "patient_id",
+        "measured_at",
+        "sys",
+        "dia",
+        "pulse",
+        "spo2",
+        "temperature",
+    }
+
+
 def test_submit_data_failure_path_leaves_row_for_background_worker(window, qtbot):
     window.provider.send_data_exception = RuntimeError("network down")
     _set_full_vitals(window)
