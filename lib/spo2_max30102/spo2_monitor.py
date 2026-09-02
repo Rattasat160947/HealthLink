@@ -60,6 +60,7 @@ class SpO2Monitor():
     ERR_NO_FINGER = "NO_FINGER"    # never saw contact for long enough
     ERR_UNSTABLE  = "UNSTABLE"     # had contact, readings never agreed
     ERR_WEAK      = "WEAK_SIGNAL"  # had contact, algorithm never got a value
+    ERR_NO_DATA   = "NO_DATA"      # sensor stopped handing over samples
 
     # ── why a window was uncomputable ────────────────────────────────────
     # "Finger on the sensor but no value" has several causes, and the fix for
@@ -121,6 +122,7 @@ class SpO2Monitor():
         self.last_error = None      # one of the ERR_* codes after a failure
         self.last_ir_dc = 0         # IR DC level last seen, for calibration
         self.overflows = 0          # FIFO gaps discarded during the last run
+        self.stalled_reads = 0      # reads that came back short, sensor quiet
         self.last_quality = None    # QUALITY_* code of the last failed window
         self.quality_counts = {}    # how often each QUALITY_* code was seen
         self.last_red_dc = 0        # red DC level, for the coverage check
@@ -347,12 +349,19 @@ class SpO2Monitor():
         self._clear_window()
         self.last_error = self.ERR_NO_FINGER
         self.overflows = 0
+        self.stalled_reads = 0
         self.last_quality = None
         self.quality_counts = {}
         start = time.time()
 
         while time.time() - start < self.max_wait_seconds:
             red, ir, fresh_ir = self._slide_window()
+
+            # A read that returned short because the sensor went quiet is not
+            # a finger problem, and saying "place your finger" about a dead
+            # I2C line sends the operator to fix the wrong thing.
+            if getattr(self.m, "last_read_timed_out", False):
+                self.stalled_reads += 1
 
             # Contact is judged on the FRESHLY read samples, not on the whole
             # window: right after the finger comes off, 75% of the window is
@@ -434,6 +443,11 @@ class SpO2Monitor():
                 self.last_error = None
                 return self.spo2
 
+        # Contact is judged on samples, so a sensor that sent none reads as
+        # "no finger" -- true, but useless. If the reads themselves were
+        # timing out, that is the failure worth reporting.
+        if self.stalled_reads and self.last_error == self.ERR_NO_FINGER:
+            self.last_error = self.ERR_NO_DATA
         return None
 
 
@@ -448,7 +462,14 @@ def main():
         sensor.m.shutdown()
 
     if result is None:
-        print("Measurement failed: reading did not stabilize within the time limit")
+        print("Measurement failed: {} ({})".format(
+            sensor.last_error,
+            SpO2Monitor.QUALITY_HINTS.get(
+                sensor.dominant_quality, "reading did not stabilize in time"),
+        ))
+        if sensor.stalled_reads:
+            print("  the sensor stopped sending samples on {} read(s) -- "
+                  "check the I2C wiring".format(sensor.stalled_reads))
     else:
         print(f"SpO2: {result}%  (pulse: {sensor.bpm} bpm)")
 

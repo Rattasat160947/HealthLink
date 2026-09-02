@@ -604,3 +604,51 @@ def test_default_progress_names_the_cause(spo2_module, capsys):
     assert "weak signal" in lines[0]
     assert "press lighter" in lines[1]
     assert "cold hand" in lines[2]
+
+
+# ── a sensor that stops sending ───────────────────────────────────────────
+
+class StalledSensor(FakeSensor):
+    """A sensor whose reads time out: the real driver returns a short buffer
+    and sets last_read_timed_out rather than spinning for ever."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.last_read_timed_out = False
+
+    def read_sequential(self, amount=110):
+        self.requested.append(amount)
+        self.last_read_timed_out = True
+        return [], []
+
+
+def test_a_sensor_that_sends_nothing_is_not_blamed_on_the_finger(spo2_module):
+    """Contact is judged on samples, so no samples reads as "no finger" --
+    true, and useless: it sends the operator to reposition a finger when the
+    I2C wiring is what needs looking at."""
+    monitor = build(spo2_module, StalledSensor(), max_wait_seconds=0.15)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_NO_DATA
+    assert monitor.stalled_reads > 0
+
+
+def test_a_stall_after_contact_still_reports_the_signal_problem(spo2_module, monkeypatch):
+    """Once a finger has been seen, the run is about signal quality; a late
+    stalled read must not relabel it as a wiring fault."""
+
+    class LateStall(FakeSensor):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.last_read_timed_out = False
+
+        def read_sequential(self, amount=110):
+            if len(self.requested) >= 2:
+                self.last_read_timed_out = True
+            return super().read_sequential(amount)
+
+    script_calc(monkeypatch, spo2_module, [None])
+    monitor = build(spo2_module, LateStall(), max_wait_seconds=0.15)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_WEAK

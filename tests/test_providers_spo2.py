@@ -257,6 +257,20 @@ def test_a_classified_window_does_not_overrule_a_no_finger_failure(provider, mon
     assert "ไม่พบนิ้ว" in str(excinfo.value)
 
 
+def test_a_silent_sensor_is_reported_as_wiring_not_placement(provider, monkeypatch):
+    """NO_DATA means the sensor stopped handing over samples; telling the
+    operator to reposition the finger would send them to the wrong thing."""
+    monitor = _FakeMonitor(spo2=None, last_error="NO_DATA")
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    message = str(excinfo.value)
+    assert "ไม่ส่งข้อมูล" in message
+    assert "วางนิ้ว" not in message
+
+
 def test_discarded_fifo_gaps_are_reported(provider, monkeypatch):
     """Dropped samples mean the Pi could not keep up with the sensor, which is
     a different problem from anything the operator can fix by holding still."""

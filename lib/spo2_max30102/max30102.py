@@ -2,7 +2,7 @@
 
 # this code is currently for python 2.7
 from __future__ import print_function
-from time import sleep
+from time import monotonic, sleep
 
 try:
     import smbus
@@ -40,12 +40,29 @@ REG_PART_ID = 0xFF
 
 
 class MAX30102():
+    # REG_PART_ID reads 0x15 on a genuine MAX30102. A MAX30100 (different
+    # register map entirely) or a bus that reads back nothing answers
+    # something else, and the symptom of that is a FIFO that never fills --
+    # so the check is worth its one transaction at startup.
+    PART_ID = 0x15
+
+    # Seconds read_sequential() will wait with NOTHING arriving before it
+    # gives up and returns a short buffer. Not a budget for the whole read:
+    # 100 samples take 4 s at the configured rate, and the timer restarts
+    # every time samples come in. At 25 Hz a sample is due every 40 ms, so
+    # two silent seconds means the sensor has stopped, not that it is slow.
+    STALL_TIMEOUT_SECONDS = 2.0
+
     # by default, this assumes that the device is at 0x57 on channel 1
     def __init__(self, channel=1, address=0x57):
         #print("Channel: {0}, address: {1}".format(channel, address))
         self.address = address
         self.channel = channel
         self.bus = smbus.SMBus(self.channel)
+        # True when the last read came back short because the sensor went
+        # quiet; callers use it to say "no data from the sensor" instead of
+        # blaming the finger.
+        self.last_read_timed_out = False
 
         self.reset()
 
@@ -101,11 +118,17 @@ class MAX30102():
 
         # 0b 0100 1111
         # sample avg = 4, fifo rollover = false, fifo almost full = 17
-        # Rollover stays OFF on purpose: with it on, a wrapped FIFO leaves the
-        # read and write pointers equal, which is indistinguishable from an
-        # empty one, so get_data_present() would report "no data" while holding
-        # 32 stale samples. Off, an overflow is detectable instead --
-        # see get_overflow_count().
+        # Rollover stays OFF on purpose: with it on the FIFO would quietly
+        # overwrite itself and the caller could never tell that the window it
+        # is about to measure has a hole in it. Off, the sensor stops writing
+        # and counts what it dropped -- see get_overflow_count().
+        #
+        # Either way a FULL FIFO parks the write pointer 32 samples ahead of
+        # the read pointer, which in 5-bit pointer arithmetic is the SAME
+        # value as empty: get_data_present() cannot tell "nothing yet" from
+        # "32 samples waiting". The overflow counter is the only thing that
+        # separates them, which is why read_sequential() consults it before
+        # deciding to wait.
         self.bus.write_i2c_block_data(self.address, REG_FIFO_CONFIG, [0x4f])
 
         # 0x02 for read-only, 0x03 for SpO2 mode, 0x07 multimode LED
@@ -119,6 +142,22 @@ class MAX30102():
         self.bus.write_i2c_block_data(self.address, REG_LED2_PA, [led_current])
         # choose value fro ~25mA for Pilot LED
         self.bus.write_i2c_block_data(self.address, REG_PILOT_PA, [0x7f])
+
+        # A warning, not an exception: the part answers at 0x57 and the rest
+        # of the setup already went through, so refusing to run would take a
+        # working-but-unrecognised clone off the kiosk. Printing it means a
+        # FIFO that never fills has an explanation at the top of the log.
+        part = self.read_part_id()
+        if part != self.PART_ID:
+            print("[SpO2] warning: part id 0x{:02X} at address 0x{:02X}, "
+                  "expected 0x{:02X} (MAX30102) -- register map may differ"
+                  .format(part, self.address, self.PART_ID))
+
+    def read_part_id(self):
+        try:
+            return self.bus.read_byte_data(self.address, REG_PART_ID)
+        except Exception:
+            return -1
 
     # this won't validate the arguments!
     # use when changing the values from default
@@ -191,13 +230,50 @@ class MAX30102():
 
         return red_led, ir_led
 
+    def restart_fifo(self):
+        """Drop what the FIFO holds and start filling from the top again.
+
+        Deliberately leaves the overflow counter alone: that is what tells the
+        caller the next window spans a gap and has to be thrown away."""
+        self.bus.write_i2c_block_data(self.address, REG_FIFO_WR_PTR, [0x00])
+        self.bus.write_i2c_block_data(self.address, REG_FIFO_RD_PTR, [0x00])
+
     def read_sequential(self, amount=110):
+        """Read `amount` samples, or fewer if the sensor stops producing them.
+
+        This used to be `while count > 0` around a 10 ms sleep with no way
+        out, so a sensor that never filled its FIFO hung the caller forever --
+        and with it the settling loop's own deadline, which is only checked
+        BETWEEN reads. Running spo2_monitor.py then printed its opening line
+        and nothing else, for ever.
+
+        Two very different things produce a FIFO that reads as empty, so they
+        are separated here rather than waited on identically:
+
+        * the sensor really has nothing yet -- wait, up to
+          STALL_TIMEOUT_SECONDS of continuous silence, then return short and
+          leave `last_read_timed_out` set;
+        * the FIFO is FULL. Rollover is off (see setup), so a full FIFO stops
+          accepting samples with its write pointer parked exactly 32 ahead of
+          the read pointer -- the same value, in 5-bit pointer arithmetic, as
+          empty. Waiting for that to clear waits for ever, because nothing
+          drains it but us; the overflow counter is what distinguishes it, and
+          the fix is to restart the FIFO and let the caller discard the window
+          the gap falls in."""
         red_buf = []
         ir_buf = []
         count = amount
+        self.last_read_timed_out = False
+        deadline = monotonic() + self.STALL_TIMEOUT_SECONDS
         while count > 0:
             num_bytes = self.get_data_present()
             if num_bytes == 0:
+                if self.get_overflow_count():
+                    self.restart_fifo()
+                    continue
+                if monotonic() >= deadline:
+                    self.last_read_timed_out = True
+                    break
                 sleep(0.01)
                 continue
             while num_bytes > 0:
@@ -206,4 +282,7 @@ class MAX30102():
                 ir_buf.append(ir)
                 num_bytes -= 1
                 count -= 1
+            # samples are flowing, so the silence timer starts over -- the
+            # timeout is for a sensor that stopped, not for a slow one
+            deadline = monotonic() + self.STALL_TIMEOUT_SECONDS
         return red_buf, ir_buf
