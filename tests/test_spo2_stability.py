@@ -665,3 +665,113 @@ def test_a_stall_after_contact_still_reports_the_signal_problem(spo2_module, mon
 
     assert monitor.measure_spo2(on_progress=quiet) is None
     assert monitor.last_error == spo2_module.SpO2Monitor.ERR_WEAK
+
+
+# ── noise must not settle ─────────────────────────────────────────────────
+
+def calc_returning(monkeypatch, module, pairs):
+    """Script calc_hr_and_spo2 as (bpm, spo2) pairs, cycling forever.
+
+    Cycling rather than repeating the last pair: these tests are about runs
+    that must NEVER settle, and a repeating final pair settles by itself.
+    bpm None means the algorithm found no heartbeat in the window, which is
+    what it reports for signal that has no pulse in it."""
+    calls = {"n": 0}
+
+    def fake_calc(ir_data, red_data):
+        bpm, sp = pairs[calls["n"] % len(pairs)]
+        calls["n"] += 1
+        hr = -999 if bpm is None else bpm
+        return hr, bpm is not None, float(sp), True
+
+    monkeypatch.setattr(module, "calc_hr_and_spo2", fake_calc)
+    return calls
+
+
+def test_spo2_without_a_pulse_never_settles(spo2_module, monkeypatch):
+    """The no-finger reading that started this: with nothing on the sensor the
+    DC threshold still reports contact and the ratio maths still returns a
+    number in the 70-100 band, so SpO2 alone cannot tell noise from a finger.
+    No heartbeat under the number means it is not a measurement."""
+    calc_returning(monkeypatch, spo2_module, [(None, 89)])
+    monitor = build(spo2_module, FakeSensor(), max_wait_seconds=0.2)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_WEAK
+    assert monitor.dominant_quality == spo2_module.SpO2Monitor.QUALITY_NO_PULSE
+
+
+def test_a_pulse_that_jumps_around_never_settles(spo2_module, monkeypatch):
+    """Steady-looking SpO2 with a pulse leaping tens of bpm per window is the
+    signature of peak intervals found in noise, not of a finger."""
+    calc_returning(monkeypatch, spo2_module, [
+        (34, 89.0), (150, 89.0), (40, 90.0), (140, 89.0), (35, 89.0),
+    ])
+    monitor = build(spo2_module, FakeSensor(), max_wait_seconds=0.2)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_UNSTABLE
+
+
+def test_a_steady_pulse_still_settles(spo2_module, monkeypatch):
+    """The guard must not cost a real finger its reading: beat-to-beat
+    variation of a few bpm is normal and has to pass."""
+    calc_returning(monkeypatch, spo2_module, [
+        (72, 97.0), (75, 97.0), (70, 98.0), (74, 97.0), (73, 97.0),
+    ])
+    monitor = build(spo2_module, FakeSensor())
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+    assert monitor.bpm == 73
+
+
+def test_readings_either_side_of_a_long_gap_do_not_count_as_agreement(
+    spo2_module, monkeypatch
+):
+    """Values eleven seconds apart are not agreeing -- the finger could have
+    done anything in between, and the spread check cannot see the gap."""
+    # four good windows, then a long stretch of unusable ones, for ever: no
+    # five agreeing readings ever occur in one unbroken run
+    pairs = [(72, 97.0)] * 4 + [(None, 97.0)] * 5
+    calc_returning(monkeypatch, spo2_module, pairs)
+    monitor = build(spo2_module, FakeSensor(), max_wait_seconds=0.3)
+
+    # before, the four from each side of a gap simply accumulated into five
+    assert monitor.measure_spo2(on_progress=quiet) is None
+
+
+def test_a_short_gap_is_still_forgiven(spo2_module, monkeypatch):
+    """One or two artifact windows inside an otherwise good run must not cost
+    the measurement -- that was the point of skipping rather than resetting."""
+    pairs = [(72, 97.0), (72, 97.0), (None, 97.0), (72, 97.0), (72, 97.0),
+             (72, 97.0)]
+    calc_returning(monkeypatch, spo2_module, pairs)
+    monitor = build(spo2_module, FakeSensor())
+
+    assert monitor.measure_spo2(on_progress=quiet) == 97
+
+
+def test_the_observed_empty_sensor_run_no_longer_settles(spo2_module, monkeypatch):
+    """Regression, replaying a real run taken with NOTHING on the sensor: it
+    ended `SpO2 89% (stable)` and the app reported 89% as the patient's.
+
+    Every layer said yes -- the IR DC cleared the finger threshold on LED
+    reflection alone, the ratio maths only ever returns 70-100 so the range
+    check passed, and the trimmed spread dropped the one outlier that would
+    have blocked the last window. The pulses are what give it away: 107, 115,
+    71, 34, then none at all."""
+    trace = [
+        (107, 95.0), (115, 95.0), (107, 95.0), (71, 98.0), (100, 79.0),
+        (83, 89.0), (115, 86.0),
+    ]
+    trace += [(None, 89.0)] * 11        # the eleven "weak signal" windows
+    trace += [(34, 92.0), (None, 89.0), (None, 89.0)]
+    calc_returning(monkeypatch, spo2_module, trace)
+    monitor = build(spo2_module, FakeSensor(), max_wait_seconds=0.5)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    # the trimmed spread of that final window is exactly 3.0 -- on the
+    # threshold, which is why it passed; the pulses are what reject it now
+    assert spo2_module.SpO2Monitor._trimmed_spread([89.0, 86.0, 92.0, 89.0, 89.0]) == 3.0
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_UNSTABLE
+    assert monitor.dominant_quality == spo2_module.SpO2Monitor.QUALITY_NO_PULSE

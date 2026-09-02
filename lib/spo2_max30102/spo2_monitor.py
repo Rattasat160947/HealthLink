@@ -38,6 +38,22 @@ class SpO2Monitor():
     # independent measurements, not the same 4 s recomputed 5 times.
     STEP_SAMPLES = 25
 
+    # Pulse rates inside one stability window have to agree too, in bpm. A
+    # real finger holds its rate within a few beats across five seconds; an
+    # empty sensor produces peak intervals out of noise, so its "pulse" jumps
+    # by tens of bpm between windows while the SpO2 numbers -- which come out
+    # of the same noise through a formula that only ever returns 70-100 --
+    # can sit close enough together to look settled.
+    MAX_PULSE_SPREAD_BPM = 20
+
+    # Consecutive uncomputable windows tolerated before the readings gathered
+    # so far are thrown away. Values either side of a long gap are not
+    # "agreeing": they are seconds apart with the finger doing anything at all
+    # in between, and the spread check cannot see the gap. Two windows of
+    # slack absorbs the occasional artifact without letting a run stitch
+    # together agreement from either end of a bad ten seconds.
+    MAX_SKIPPED_WINDOWS = 2
+
     # physiologically plausible windows; anything outside is a bad computation
     MIN_VALID_SPO2 = 70
     MAX_VALID_SPO2 = 100
@@ -346,6 +362,7 @@ class SpO2Monitor():
 
         readings = []
         pulses = []
+        skipped = 0
         self._clear_window()
         self.last_error = self.ERR_NO_FINGER
         self.overflows = 0
@@ -406,17 +423,41 @@ class SpO2Monitor():
             hr, hr_valid, sp, sp_valid = calc_hr_and_spo2(np.array(ir), np.array(red))
             bpm = int(hr) if hr_valid and self.MIN_VALID_BPM <= hr <= self.MAX_VALID_BPM else 0
 
-            if not sp_valid or not (self.MIN_VALID_SPO2 <= sp <= self.MAX_VALID_SPO2):
-                # One unusable window (motion artifact / weak perfusion): skip
-                # it but keep what we already have. If the value really moved,
-                # the spread check below rejects the window anyway. First ask
-                # the raw samples WHY it was unusable, so a run that never
-                # settles can end with an instruction instead of a shrug.
+            usable = sp_valid and self.MIN_VALID_SPO2 <= sp <= self.MAX_VALID_SPO2
+            if usable and not bpm:
+                # An SpO2 number with no heartbeat under it is not a
+                # measurement of anything. The ratio maths keeps producing
+                # values from noise -- its output can only ever land in the
+                # 70-100 band the range check accepts -- so with nothing on
+                # the sensor the finger check (a DC threshold) and the range
+                # check both pass and the reading looks real. A pulse is the
+                # one thing noise cannot fake for long.
+                usable = False
+
+            if not usable:
+                # Skip the window but keep what we already have -- one
+                # artifact should not cost the whole measurement. Past
+                # MAX_SKIPPED_WINDOWS in a row it is not an artifact any more,
+                # and readings from before the gap must not be counted as
+                # agreeing with readings from after it.
+                skipped += 1
+                if skipped > self.MAX_SKIPPED_WINDOWS:
+                    readings.clear()
+                    pulses.clear()
+                # Ask the raw samples WHY, so a run that never settles can end
+                # with an instruction instead of a shrug.
                 quality = self.assess_signal(red, ir)
+                if quality is None and not bpm:
+                    # Samples in range, no beat found in them: an empty sensor
+                    # (or a finger with no perfusion reaching it) looks exactly
+                    # like this.
+                    quality = self._record_quality(self.QUALITY_NO_PULSE)
                 if on_progress:
                     on_progress(None, bpm=bpm, stable=False, finger_detected=True,
                                 quality=quality)
                 continue
+
+            skipped = 0
 
             # The algorithm produced a usable value, so any failure from here
             # is the readings refusing to agree, not a signal we never got.
@@ -431,6 +472,7 @@ class SpO2Monitor():
             stable = (
                 len(readings) == self.stability_window
                 and self._trimmed_spread(readings) <= self.stability_threshold
+                and (max(pulses) - min(pulses)) <= self.MAX_PULSE_SPREAD_BPM
             )
 
             if on_progress:
