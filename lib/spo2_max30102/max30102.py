@@ -53,6 +53,16 @@ class MAX30102():
     # two silent seconds means the sensor has stopped, not that it is slow.
     STALL_TIMEOUT_SECONDS = 2.0
 
+    # Hard ceiling on a single call, whatever the silence timer is doing.
+    # The timer restarts every time samples arrive, so a part that keeps
+    # producing them -- just far slower than setup() asked for -- resets it
+    # for ever and one read runs without end. measure_spo2() tests its own
+    # deadline only BETWEEN reads, so its 30 s budget is only as real as the
+    # longest single read. 100 samples take 4 s at the configured rate; past
+    # this the part is not running at that rate and there is nothing to wait
+    # for.
+    MAX_READ_SECONDS = 10.0
+
     # by default, this assumes that the device is at 0x57 on channel 1
     def __init__(self, channel=1, address=0x57):
         #print("Channel: {0}, address: {1}".format(channel, address))
@@ -285,8 +295,12 @@ class MAX30102():
         count = amount
         self.last_read_timed_out = False
         deadline = monotonic() + self.STALL_TIMEOUT_SECONDS
+        hard_deadline = monotonic() + self.MAX_READ_SECONDS
         restarted = False
         while count > 0:
+            if monotonic() >= hard_deadline:
+                self.last_read_timed_out = True
+                break
             num_bytes = self.get_data_present()
             if num_bytes == 0:
                 # Once per silent stretch, not once per pass. restart_fifo()

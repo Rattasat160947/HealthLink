@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 import types
 
 import pytest
@@ -254,3 +255,25 @@ def test_a_fifo_that_stays_full_still_gives_up(driver_module):
     assert sensor.last_read_timed_out is True
     restarts = [reg for reg, _ in bus.writes if reg == 0x04]
     assert len(restarts) == 1          # tried once, not spun on
+
+
+def test_a_trickling_sensor_cannot_outlive_the_callers_budget(driver_module):
+    """The silence timer restarts every time samples arrive, so a part that
+    keeps producing them -- just far slower than setup() asked for -- resets it
+    for ever and this call never ends. measure_spo2() tests its own deadline
+    only BETWEEN reads, so its 30 s budget is worth no more than the longest
+    single read is bounded."""
+    class TricklingBus(FakeBus):
+        def read_byte_data(self, address, register):
+            return 1 if register == 0x04 else 0     # one sample, always
+        def read_i2c_block_data(self, address, register, length):
+            return [0x01, 0x00, 0x00, 0x02, 0x00, 0x00]
+
+    sensor = build(driver_module, TricklingBus(), MAX_READ_SECONDS=0.05)
+
+    started = time.monotonic()
+    red, ir = sensor.read_sequential(10_000_000)
+
+    assert time.monotonic() - started < 2.0
+    assert len(red) < 10_000_000
+    assert sensor.last_read_timed_out is True

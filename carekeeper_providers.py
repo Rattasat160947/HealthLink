@@ -618,11 +618,23 @@ class RealCareKeeperProvider(CareKeeperProvider):
         except Exception as e:
             raise RuntimeError(f"ไม่พบเซนเซอร์อุณหภูมิ (DS18B20): {e}")
 
-        result = sensor.measure_body_temperature(
-            on_progress=lambda temp, **state: self._notify_measurement_progress(
-                "temp", temp, **state
+        try:
+            result = sensor.measure_body_temperature(
+                on_progress=lambda temp, **state: self._notify_measurement_progress(
+                    "temp", temp, **state
+                )
             )
-        )
+        except Exception as e:
+            # The probe raises when the 1-Wire bus fails repeatedly -- a CRC
+            # storm on a long cable, or a probe unplugged mid-measurement.
+            # Only the constructor was wrapped, so those came out as the
+            # driver's own English string: "CRC Error" on a Thai kiosk screen,
+            # which names nothing the operator can act on. The reason is kept
+            # on the end for the log, the same shape as the missing-probe
+            # message above.
+            raise RuntimeError(
+                f"อ่านค่าจากเซนเซอร์อุณหภูมิไม่ได้ (ตรวจสายเซนเซอร์ DS18B20): {e}"
+            )
         if result is None:
             raise RuntimeError("วัดอุณหภูมิไม่สำเร็จ (แนบเซนเซอร์กับผิวแล้วรอให้ค่านิ่ง)")
         return float(result)

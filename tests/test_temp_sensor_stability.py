@@ -155,3 +155,27 @@ def test_scattered_bad_frames_do_not_add_up_to_a_dead_probe(monkeypatch):
 
     assert sensor.measure_body_temperature(on_progress=quiet) == 36.5
     assert sensor.read_errors == 3
+
+
+# ── what the kiosk shows when the probe gives up ──────────────────────────
+
+def test_a_raised_probe_error_reaches_the_kiosk_in_thai(monkeypatch):
+    """measure_body_temperature() raises when the 1-Wire bus fails repeatedly,
+    and only the CONSTRUCTOR was wrapped -- so the driver's own English string
+    went straight to a Thai kiosk screen as "CRC Error", naming nothing the
+    operator could act on."""
+    from carekeeper_providers import RealCareKeeperProvider
+
+    provider = RealCareKeeperProvider()
+    sensor = build(monkeypatch, [Exception("CRC Error")])
+    monkeypatch.setattr(
+        "lib.temp_sensor.temp_sensor", lambda **kwargs: sensor, raising=True
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_temperature()
+
+    message = str(excinfo.value)
+    assert "เซนเซอร์อุณหภูมิ" in message
+    assert "DS18B20" in message
+    assert "CRC Error" in message      # the reason survives, for the log
