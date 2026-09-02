@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 import types
 
 import pytest
@@ -326,7 +327,7 @@ class BufferingSensor(FakeSensor):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.overflowing = True   # stale, from the idle time before the run
-        self.fifo_resets = 0
+        self.fifo_flushes = 0
 
     def get_overflow_count(self):
         return 7 if self.overflowing else 0
@@ -334,8 +335,8 @@ class BufferingSensor(FakeSensor):
     def clear_overflow_count(self):
         self.overflowing = False
 
-    def reset_fifo(self):
-        self.fifo_resets += 1
+    def flush_fifo(self):
+        self.fifo_flushes += 1
         self.overflowing = False
 
 
@@ -352,7 +353,7 @@ def test_a_stale_overflow_does_not_cost_the_first_window(spo2_module, monkeypatc
     monitor = build(spo2_module, sensor)
 
     assert monitor.measure_spo2(on_progress=quiet) == 97
-    assert sensor.fifo_resets >= 1   # emptied before the first read
+    assert sensor.fifo_flushes >= 1  # emptied before the first read
     assert monitor.overflows == 0    # so no window was thrown away
     assert sensor.requested == [100, 25, 25, 25, 25]  # filled once, then slid
 
@@ -412,6 +413,49 @@ def test_failure_reason_is_weak_signal_when_the_algorithm_got_nothing(spo2_modul
 
     assert monitor.measure_spo2(on_progress=quiet) is None
     assert monitor.last_error == spo2_module.SpO2Monitor.ERR_WEAK
+
+
+class SilentSensor:
+    """A part that answers every read with nothing at all.
+
+    What an I2C fault, a shut-down sensor, or a FIFO whose pointers were
+    written out from under the chip's own tracking look like from up here."""
+
+    def __init__(self):
+        self.requested: list[int] = []
+
+    def read_sequential(self, amount=110):
+        self.requested.append(amount)
+        return [], []
+
+
+def test_a_silent_sensor_is_not_blamed_on_the_finger(spo2_module, monkeypatch):
+    """Zero samples means the part is not producing data, and the DC level is
+    zero only because there is nothing to average -- which is indistinguishable
+    from "no finger" unless the two are counted apart. They need opposite
+    things: one from the person on the sensor, one from whoever wired it."""
+    sensor = SilentSensor()
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor, max_wait_seconds=0.2)
+
+    started = time.monotonic()
+    assert monitor.measure_spo2(on_progress=quiet) is None
+
+    assert time.monotonic() - started < 2.0      # it gave up, it did not hang
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_NO_DATA
+    assert monitor.reads == 0 and monitor.stalls > 0
+
+
+def test_a_dark_signal_is_still_a_finger_problem(spo2_module, monkeypatch):
+    """Samples ARE arriving here, they are just dark. That is placement, and
+    the no-data branch above must not swallow it."""
+    sensor = FakeSensor(ir_levels=(1200,))
+    script_calc(monkeypatch, spo2_module, [97])
+    monitor = build(spo2_module, sensor, max_wait_seconds=0.15)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_NO_FINGER
+    assert monitor.stalls == 0
 
 
 def test_failure_reason_is_unstable_when_values_never_agree(spo2_module, monkeypatch):

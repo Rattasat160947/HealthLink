@@ -509,6 +509,10 @@ class RealCareKeeperProvider(CareKeeperProvider):
         "NO_FINGER": "ไม่พบนิ้วบนเซนเซอร์ SpO2 (วางนิ้วให้แนบเต็มหน้าเซนเซอร์)",
         "WEAK_SIGNAL": "สัญญาณ SpO2 อ่อนเกินไป (วางนิ้วให้แนบสนิท ไม่กดแรง และอยู่นิ่งๆ)",
         "UNSTABLE": "ค่า SpO2 ยังไม่นิ่ง (อยู่นิ่งๆ อย่าขยับนิ้วระหว่างวัด)",
+        # Not a placement problem at all: the MAX30102 produced no samples for
+        # the entire run. Kept out of the three above because the instruction
+        # is for whoever maintains the kiosk, not for the person being measured.
+        "NO_DATA": "เซนเซอร์ SpO2 ไม่ส่งข้อมูล (ตรวจสอบสาย I2C ของเซนเซอร์ แล้วลองวัดใหม่)",
     }
 
     # WEAK_SIGNAL only says the algorithm got nothing; the monitor also

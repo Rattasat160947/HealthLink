@@ -60,6 +60,7 @@ class SpO2Monitor():
     ERR_NO_FINGER = "NO_FINGER"    # never saw contact for long enough
     ERR_UNSTABLE  = "UNSTABLE"     # had contact, readings never agreed
     ERR_WEAK      = "WEAK_SIGNAL"  # had contact, algorithm never got a value
+    ERR_NO_DATA   = "NO_DATA"      # the part never produced a single sample
 
     # ── why a window was uncomputable ────────────────────────────────────
     # "Finger on the sensor but no value" has several causes, and the fix for
@@ -121,6 +122,8 @@ class SpO2Monitor():
         self.last_error = None      # one of the ERR_* codes after a failure
         self.last_ir_dc = 0         # IR DC level last seen, for calibration
         self.overflows = 0          # FIFO gaps discarded during the last run
+        self.reads = 0              # window reads that returned samples
+        self.stalls = 0             # window reads that came back empty
         self.last_quality = None    # QUALITY_* code of the last failed window
         self.quality_counts = {}    # how often each QUALITY_* code was seen
         self.last_red_dc = 0        # red DC level, for the coverage check
@@ -276,7 +279,7 @@ class SpO2Monitor():
         done anything wrong.
 
         getattr-guarded because injected/fake sensors need not model a FIFO."""
-        reset = getattr(self.m, "reset_fifo", None)
+        reset = getattr(self.m, "flush_fifo", None)
         if reset is None:
             # Older driver: at least clear the counter so a stale overflow
             # does not condemn the window we are about to fill.
@@ -347,12 +350,36 @@ class SpO2Monitor():
         self._clear_window()
         self.last_error = self.ERR_NO_FINGER
         self.overflows = 0
+        self.reads = 0
+        self.stalls = 0
         self.last_quality = None
         self.quality_counts = {}
         start = time.time()
 
         while time.time() - start < self.max_wait_seconds:
             red, ir, fresh_ir = self._slide_window()
+
+            if not fresh_ir:
+                # Not one sample came back. That is the part failing to
+                # produce data -- an I2C fault, a stalled FIFO, a sensor that
+                # was shut down -- and it is NOT a finger problem, however
+                # much it looks like one from the DC level (which is zero
+                # because there is nothing to average). Telling somebody to
+                # place their finger is unactionable advice for a wiring
+                # fault, so the two are counted apart and named apart below.
+                #
+                # Reachable at all only because read_sequential() gives up
+                # once the FIFO stops advancing; it used to block here
+                # forever, which is what "it just does not read" looked like.
+                self.stalls += 1
+                readings.clear()
+                pulses.clear()
+                self._clear_window()
+                if on_progress:
+                    on_progress(None, bpm=0, stable=False, finger_detected=False)
+                continue
+
+            self.reads += 1
 
             # Contact is judged on the FRESHLY read samples, not on the whole
             # window: right after the finger comes off, 75% of the window is
@@ -434,6 +461,10 @@ class SpO2Monitor():
                 self.last_error = None
                 return self.spo2
 
+        if self.reads == 0 and self.stalls:
+            # Not a single window in the whole run had samples in it, so
+            # nothing about this failure is about where the finger was.
+            self.last_error = self.ERR_NO_DATA
         return None
 
 

@@ -2,7 +2,7 @@
 
 # this code is currently for python 2.7
 from __future__ import print_function
-from time import sleep
+from time import monotonic, sleep
 
 try:
     import smbus
@@ -151,22 +151,36 @@ class MAX30102():
     def clear_overflow_count(self):
         self.bus.write_i2c_block_data(self.address, REG_OVF_COUNTER, [0x00])
 
-    def reset_fifo(self):
-        """Throw away everything the FIFO holds and clear the overflow count.
+    def flush_fifo(self):
+        """Drop whatever the FIFO holds, WITHOUT touching the write side.
 
         The chip samples continuously from setup() onwards, and with rollover
         off the 32-deep FIFO fills in 1.28 s at the 25 Hz output rate. So by
         the time a caller actually starts measuring, the buffer is already
-        full of samples taken before the finger arrived AND the overflow
-        counter is already set -- which is why the first window of every
-        measurement used to be built from stale data and then discarded by
-        the overflow check anyway.
+        full of samples taken before the finger arrived and the overflow
+        counter is already set, and the first window of the measurement is
+        built from that stale data and then discarded by the overflow check.
 
-        Zeroing all three pointers together is the datasheet's way of
-        starting a fresh acquisition; the same three writes setup() does."""
-        self.bus.write_i2c_block_data(self.address, REG_FIFO_WR_PTR, [0x00])
-        self.bus.write_i2c_block_data(self.address, REG_OVF_COUNTER, [0x00])
-        self.bus.write_i2c_block_data(self.address, REG_FIFO_RD_PTR, [0x00])
+        The buffer is emptied by READING it out and throwing the samples
+        away -- the same read_fifo() calls an ordinary measurement makes, which
+        advance the read pointer through the part's own logic. At most 31 of
+        them, so about 30 ms.
+
+        Writing the pointers directly would be quicker, and zeroing all three
+        is the datasheet's INIT sequence, but that is not safe to issue against
+        a part already mid-acquisition: it moves the pointers out from under
+        the chip's own full/empty tracking, and a FIFO that then reads back
+        WR == RD cannot be told apart from an empty one. That is the same
+        ambiguity setup() disables rollover to avoid, and read_sequential()
+        answers it by waiting for samples which never arrive -- a measurement
+        that hangs with no value and no error. Draining through the normal
+        read path cannot get the part into that state, because it is the path
+        the part is in the middle of anyway."""
+        pending = self.get_data_present()
+        while pending > 0:
+            self.read_fifo()
+            pending -= 1
+        self.clear_overflow_count()
 
     def read_fifo(self):
         """
@@ -191,13 +205,34 @@ class MAX30102():
 
         return red_led, ir_led
 
-    def read_sequential(self, amount=110):
+    # No sample has arrived for this long => the FIFO is not advancing.
+    # Generous next to the 40 ms sample interval, so ordinary I2C contention
+    # (the UPS HAT shares this bus) never trips it.
+    NO_DATA_TIMEOUT = 1.0
+
+    def read_sequential(self, amount=110, no_data_timeout=None):
+        """Read `amount` samples, or give up once the FIFO stops advancing.
+
+        This used to loop until data arrived, with no way out, and nothing
+        above it could recover: measure_spo2() tests its deadline at the top of
+        its own loop, which a call that never returns never reaches. So a part
+        that stopped producing samples -- for any reason -- presented as a
+        measurement that hung forever with no value, no error and no timeout.
+
+        Returning short instead hands control back so the caller's deadline can
+        do its job. A partly filled window already has a meaning upstream: it
+        is skipped as "not enough signal buffered yet"."""
+        if no_data_timeout is None:
+            no_data_timeout = self.NO_DATA_TIMEOUT
         red_buf = []
         ir_buf = []
         count = amount
+        last_sample = monotonic()
         while count > 0:
             num_bytes = self.get_data_present()
             if num_bytes == 0:
+                if monotonic() - last_sample >= no_data_timeout:
+                    break
                 sleep(0.01)
                 continue
             while num_bytes > 0:
@@ -206,4 +241,5 @@ class MAX30102():
                 ir_buf.append(ir)
                 num_bytes -= 1
                 count -= 1
+            last_sample = monotonic()
         return red_buf, ir_buf
