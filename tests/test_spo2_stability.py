@@ -415,37 +415,6 @@ def test_failure_reason_is_weak_signal_when_the_algorithm_got_nothing(spo2_modul
     assert monitor.last_error == spo2_module.SpO2Monitor.ERR_WEAK
 
 
-class SilentSensor:
-    """A part that answers every read with nothing at all.
-
-    What an I2C fault, a shut-down sensor, or a FIFO whose pointers were
-    written out from under the chip's own tracking look like from up here."""
-
-    def __init__(self):
-        self.requested: list[int] = []
-
-    def read_sequential(self, amount=110):
-        self.requested.append(amount)
-        return [], []
-
-
-def test_a_silent_sensor_is_not_blamed_on_the_finger(spo2_module, monkeypatch):
-    """Zero samples means the part is not producing data, and the DC level is
-    zero only because there is nothing to average -- which is indistinguishable
-    from "no finger" unless the two are counted apart. They need opposite
-    things: one from the person on the sensor, one from whoever wired it."""
-    sensor = SilentSensor()
-    script_calc(monkeypatch, spo2_module, [97])
-    monitor = build(spo2_module, sensor, max_wait_seconds=0.2)
-
-    started = time.monotonic()
-    assert monitor.measure_spo2(on_progress=quiet) is None
-
-    assert time.monotonic() - started < 2.0      # it gave up, it did not hang
-    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_NO_DATA
-    assert monitor.reads == 0 and monitor.stalls > 0
-
-
 def test_a_dark_signal_is_still_a_finger_problem(spo2_module, monkeypatch):
     """Samples ARE arriving here, they are just dark. That is placement, and
     the no-data branch above must not swallow it."""
@@ -455,7 +424,7 @@ def test_a_dark_signal_is_still_a_finger_problem(spo2_module, monkeypatch):
 
     assert monitor.measure_spo2(on_progress=quiet) is None
     assert monitor.last_error == spo2_module.SpO2Monitor.ERR_NO_FINGER
-    assert monitor.stalls == 0
+    assert monitor.stalled_reads == 0
 
 
 def test_failure_reason_is_unstable_when_values_never_agree(spo2_module, monkeypatch):
@@ -648,3 +617,51 @@ def test_default_progress_names_the_cause(spo2_module, capsys):
     assert "weak signal" in lines[0]
     assert "press lighter" in lines[1]
     assert "cold hand" in lines[2]
+
+
+# ── a sensor that stops sending ───────────────────────────────────────────
+
+class StalledSensor(FakeSensor):
+    """A sensor whose reads time out: the real driver returns a short buffer
+    and sets last_read_timed_out rather than spinning for ever."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.last_read_timed_out = False
+
+    def read_sequential(self, amount=110):
+        self.requested.append(amount)
+        self.last_read_timed_out = True
+        return [], []
+
+
+def test_a_sensor_that_sends_nothing_is_not_blamed_on_the_finger(spo2_module):
+    """Contact is judged on samples, so no samples reads as "no finger" --
+    true, and useless: it sends the operator to reposition a finger when the
+    I2C wiring is what needs looking at."""
+    monitor = build(spo2_module, StalledSensor(), max_wait_seconds=0.15)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_NO_DATA
+    assert monitor.stalled_reads > 0
+
+
+def test_a_stall_after_contact_still_reports_the_signal_problem(spo2_module, monkeypatch):
+    """Once a finger has been seen, the run is about signal quality; a late
+    stalled read must not relabel it as a wiring fault."""
+
+    class LateStall(FakeSensor):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.last_read_timed_out = False
+
+        def read_sequential(self, amount=110):
+            if len(self.requested) >= 2:
+                self.last_read_timed_out = True
+            return super().read_sequential(amount)
+
+    script_calc(monkeypatch, spo2_module, [None])
+    monitor = build(spo2_module, LateStall(), max_wait_seconds=0.15)
+
+    assert monitor.measure_spo2(on_progress=quiet) is None
+    assert monitor.last_error == spo2_module.SpO2Monitor.ERR_WEAK

@@ -180,22 +180,6 @@ def test_no_finger_failure_names_the_placement_and_shows_the_ir_level(provider, 
     assert "IR=7400/10000" in message
 
 
-def test_a_silent_sensor_is_reported_as_a_wiring_fault(provider, monkeypatch):
-    """The one SpO2 failure the person being measured cannot do anything
-    about, so the message is addressed to whoever maintains the kiosk and
-    carries no placement instruction at all."""
-    monitor = _FakeMonitor(spo2=None, last_error="NO_DATA")
-    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
-
-    with pytest.raises(RuntimeError) as excinfo:
-        provider.measure_spo2()
-
-    message = str(excinfo.value)
-    assert "ไม่ส่งข้อมูล" in message
-    assert "I2C" in message
-    assert "วางนิ้ว" not in message
-
-
 def test_unstable_failure_asks_the_operator_to_hold_still(provider, monkeypatch):
     """The opposite instruction from the no-finger case: contact was fine."""
     monitor = _FakeMonitor(spo2=None, last_error="UNSTABLE")
@@ -271,6 +255,21 @@ def test_a_classified_window_does_not_overrule_a_no_finger_failure(provider, mon
         provider.measure_spo2()
 
     assert "ไม่พบนิ้ว" in str(excinfo.value)
+
+
+def test_a_silent_sensor_is_reported_as_wiring_not_placement(provider, monkeypatch):
+    """NO_DATA means the sensor stopped handing over samples; telling the
+    operator to reposition the finger would send them to the wrong thing."""
+    monitor = _FakeMonitor(spo2=None, last_error="NO_DATA")
+    monkeypatch.setattr(provider, "_open_spo2_sensor", lambda: monitor)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.measure_spo2()
+
+    message = str(excinfo.value)
+    assert "ไม่ส่งข้อมูล" in message
+    assert "I2C" in message      # names what to go and check
+    assert "วางนิ้ว" not in message
 
 
 def test_discarded_fifo_gaps_are_reported(provider, monkeypatch):
