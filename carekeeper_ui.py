@@ -273,6 +273,7 @@ class BatteryIndicator(QWidget):
         # containing a lightning glyph. A minus means the battery is not
         # charging; the filled zig-zag means charging or fast charging.
         symbol = QColor("#0b1f33")
+        symbol_outline = QColor("#f8fafc")
         if self.charging:
             lightning = QPainterPath()
             lightning.moveTo(15.5, 2.5)
@@ -282,12 +283,16 @@ class BatteryIndicator(QWidget):
             lightning.lineTo(18.0, 6.5)
             lightning.lineTo(14.5, 6.5)
             lightning.closeSubpath()
-            painter.setPen(Qt.NoPen)
+            # Keep the bolt visible whether it sits over the cyan charge fill
+            # or over the dark, unfilled part of the battery.
+            painter.setPen(QPen(symbol_outline, 1.0, Qt.SolidLine, Qt.RoundCap))
             painter.setBrush(QBrush(symbol))
             painter.drawPath(lightning)
         else:
             painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(symbol, 2.0, Qt.SolidLine, Qt.RoundCap))
+            painter.setPen(QPen(symbol_outline, 3.2, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(10, 7, 17, 7)
+            painter.setPen(QPen(symbol, 1.6, Qt.SolidLine, Qt.RoundCap))
             painter.drawLine(10, 7, 17, 7)
 
 
@@ -1963,9 +1968,7 @@ class CareKeeperWindow(QMainWindow):
         self.lbl_system_message = ElidedLabel("สถานะ: รอคำสั่งวัดค่า")
         self.lbl_system_message.setObjectName("SystemMessageNeutral")
         self.lbl_system_message.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.lbl_measure_count = self._console_label("วัดค่าสำเร็จแล้ว 0 รายการ", "FooterHint")
         footer_layout.addWidget(self.lbl_system_message, 2)
-        footer_layout.addWidget(self.lbl_measure_count, 1)
         self.btn_summary = QPushButton("สรุปผลการวัด  >")
         self.btn_summary.setObjectName("BtnSummaryDisabled")
         self.btn_summary.setFixedSize(260, 54)
@@ -2098,7 +2101,7 @@ class CareKeeperWindow(QMainWindow):
         panel_layout.addWidget(self.history_panel)
 
         self.lbl_summary_system_message = self._console_label("สถานะ: ตรวจสอบข้อมูลก่อนบันทึก", "SystemMessageNeutral")
-        panel_layout.addWidget(self.lbl_summary_system_message)
+        self.lbl_summary_system_message.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 8, 0, 0)
@@ -2108,7 +2111,7 @@ class CareKeeperWindow(QMainWindow):
         self.btn_back_home.setFixedSize(210, 50)
         self.btn_back_home.clicked.connect(self._reset_session)
         footer.addWidget(self.btn_back_home)
-        footer.addStretch()
+        footer.addWidget(self.lbl_summary_system_message, 2)
         self.btn_finish = QPushButton("บันทึกข้อมูล  >")
         self.btn_finish.setObjectName("BtnFinish")
         self.btn_finish.setFixedSize(320, 54)
@@ -2303,8 +2306,6 @@ class CareKeeperWindow(QMainWindow):
     def _refresh_summary_button(self) -> None:
         count = self._measured_count()
         has_data = count > 0
-        if hasattr(self, "lbl_measure_count"):
-            self.lbl_measure_count.setText(f"วัดค่าสำเร็จแล้ว {count} รายการ")
         self.btn_summary.setEnabled(has_data)
         self.btn_summary.setObjectName("BtnSummaryReady" if has_data else "BtnSummaryDisabled")
         self.btn_summary.setText("สรุปผลการวัด  >" if has_data else "รอผลการวัด")

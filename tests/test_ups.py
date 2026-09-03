@@ -65,9 +65,9 @@ def test_status_charging_bit_0x80(ups):
     assert ups.get_status() == "CHARGING"
 
 
-def test_status_discharging_bit_0x20(ups):
+def test_status_vbus_powered_bit_0x20(ups):
     FakeSMBus.registers[0x02] = [0x20]
-    assert ups.get_status() == "DISCHARGING"
+    assert ups.get_status() == "VBUS_POWERED"
 
 
 def test_status_fast_charging_takes_priority_over_charging(ups):
@@ -141,7 +141,7 @@ def test_get_all_reports_time_to_full_while_charging(ups):
 def test_get_all_reports_runtime_to_empty_while_discharging(ups):
     _fill_common_registers(charging=False)
     info = ups.get_all()
-    assert info["status"] == "DISCHARGING"
+    assert info["status"] == "VBUS_POWERED"
     assert info["runtime_to_empty"] == 90
     assert "time_to_full" not in info
 

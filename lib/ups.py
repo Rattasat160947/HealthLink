@@ -22,7 +22,7 @@ class UPSHat:
     STATUS_IDLE = "IDLE"
     STATUS_CHARGING = "CHARGING"
     STATUS_FAST_CHARGING = "FAST_CHARGING"
-    STATUS_DISCHARGING = "DISCHARGING"
+    STATUS_VBUS_POWERED = "VBUS_POWERED"
 
     def __init__(self, bus_num=1):
         self.bus = smbus.SMBus(bus_num)
@@ -45,7 +45,10 @@ class UPSHat:
             return self.STATUS_CHARGING
 
         elif data[0] & 0x20:
-            return self.STATUS_DISCHARGING
+            # Bit 5 means external power is present on VBUS.  This bit can
+            # remain set after the battery is full, when the active-charging
+            # bits above are no longer set.
+            return self.STATUS_VBUS_POWERED
 
         return self.STATUS_IDLE
 

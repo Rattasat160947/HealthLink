@@ -724,6 +724,7 @@ class RealCareKeeperProvider(CareKeeperProvider):
             charging = ups.get_status() in {
                 UPSHat.STATUS_CHARGING,
                 UPSHat.STATUS_FAST_CHARGING,
+                UPSHat.STATUS_VBUS_POWERED,
             }
             return percent, charging
         except Exception as e:
